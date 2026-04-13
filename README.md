@@ -1,8 +1,8 @@
 # 🧭 reponboard-ai
 
-> **Reponboard any codebase in 5 minutes**
+> **AI-powered onboarding agent** — Reponboard any codebase in 5 minutes
 
-After 8+ years onboarding to legacy codebases, I built what I always wished I had.
+The codebase tour you never got
 
 [![Demo](https://img.shields.io/badge/Live_Demo-Visit-blue?style=for-the-badge)](https://reponboard.vercel.app)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -12,6 +12,8 @@ After 8+ years onboarding to legacy codebases, I built what I always wished I ha
 ---
 
 ## 🎯 What It Does
+
+An AI agent that analyzes any GitHub repo and generates a complete onboarding guide.
 
 Paste a GitHub URL → Get an instant architecture breakdown:
 
@@ -29,7 +31,7 @@ Then ask follow-up questions: *"How does auth work?"* *"Where are API routes def
 
 ```bash
 # Clone the repo
-git clone https://github.com/amonterroso/reponboard-ai.git
+git clone https://github.com/aamonterroso/reponboard-ai.git
 cd reponboard-ai
 
 # Install dependencies
@@ -78,7 +80,7 @@ GitHub URL
 | Layer | Tech |
 |-------|------|
 | Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS |
-| Agent | Claude API with tool use |
+| AI Agent | Claude API with tool use (autonomous multi-step reasoning) |
 | Repo Parsing | GitHub API (tree endpoint) |
 | Diagrams | Mermaid.js |
 | Deploy | Vercel |
@@ -134,13 +136,13 @@ Contributions welcome! Please read [CONTRIBUTING.md](docs/CONTRIBUTING.md) first
 
 ## 📄 License
 
-MIT © [Allan Monterroso](https://github.com/amonterroso)
+MIT © [Allan Monterroso](https://github.com/aamonterroso)
 
 ---
 
 ## 🙏 Acknowledgments
 
-Built with [Claude](https://anthropic.com) by Anthropic. Inspired by the pain of onboarding to every legacy codebase I've touched in 8+ years.
+Powered by [Claude](https://anthropic.com). Built because every dev deserves a proper codebase tour.
 
 ---
 
