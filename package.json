@@ -1,0 +1,36 @@
+{
+  "name": "reponboard-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reponboard any codebase in 5 minutes — AI-powered onboarding agent",
+  "author": "Allan Monterroso <allan.monterroso1@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amonterroso/reponboard-ai.git"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "codebase",
+    "onboarding",
+    "documentation",
+    "github",
+    "claude",
+    "anthropic",
+    "developer-tools"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "start": "pnpm --filter web start",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "clean": "pnpm -r clean && rm -rf node_modules"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}
