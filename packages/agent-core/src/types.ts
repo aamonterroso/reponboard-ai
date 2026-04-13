@@ -1,0 +1,257 @@
+// ─── GitHub API Types ────────────────────────────────────────────────────────
+
+export interface GitHubRepoInfo {
+  owner: string
+  name: string
+  fullName: string
+  description: string | null
+  defaultBranch: string
+  stars: number
+  forks: number
+  language: string | null
+  topics: string[]
+  size: number
+  createdAt: string
+  updatedAt: string
+  license: string | null
+  isPrivate: boolean
+}
+
+export type GitHubTreeNodeType = 'blob' | 'tree' | 'commit'
+
+export interface GitHubTreeNode {
+  path: string
+  mode: string
+  type: GitHubTreeNodeType
+  sha: string
+  size?: number
+  url: string
+}
+
+export interface GitHubFileContent {
+  path: string
+  content: string
+  encoding: 'base64' | 'utf-8'
+  size: number
+  sha: string
+}
+
+// ─── Stack Detection Types ───────────────────────────────────────────────────
+
+export type StackCategory =
+  | 'frontend'
+  | 'backend'
+  | 'fullstack'
+  | 'mobile'
+  | 'cli'
+  | 'library'
+  | 'monorepo'
+  | 'unknown'
+
+export type RuntimeId =
+  | 'nodejs'
+  | 'python'
+  | 'go'
+  | 'rust'
+  | 'java'
+  | 'dotnet'
+  | 'ruby'
+  | 'php'
+  | 'unknown'
+
+export type FrameworkId =
+  | 'nextjs'
+  | 'react'
+  | 'vue'
+  | 'svelte'
+  | 'angular'
+  | 'nuxt'
+  | 'astro'
+  | 'remix'
+  | 'express'
+  | 'fastify'
+  | 'nestjs'
+  | 'hono'
+  | 'django'
+  | 'fastapi'
+  | 'flask'
+  | 'gin'
+  | 'echo'
+  | 'axum'
+  | 'spring'
+  | 'unknown'
+
+export interface DetectedStack {
+  runtime: RuntimeId
+  framework: FrameworkId
+  category: StackCategory
+  packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun' | 'pip' | 'cargo' | 'go' | 'maven' | 'gradle' | 'unknown'
+  language: 'typescript' | 'javascript' | 'python' | 'go' | 'rust' | 'java' | 'csharp' | 'ruby' | 'php' | 'unknown'
+  hasTests: boolean
+  hasDocker: boolean
+  hasCi: boolean
+  additionalLibraries: string[]
+}
+
+// ─── Discovery Phase Types ───────────────────────────────────────────────────
+
+export type EntryPointKind =
+  | 'main'
+  | 'server'
+  | 'cli'
+  | 'app'
+  | 'index'
+  | 'config'
+  | 'test'
+
+export interface EntryPoint {
+  path: string
+  kind: EntryPointKind
+  reason: string
+}
+
+export type KeyFileRole =
+  | 'config'
+  | 'schema'
+  | 'router'
+  | 'model'
+  | 'service'
+  | 'utility'
+  | 'types'
+  | 'test'
+  | 'documentation'
+
+export interface KeyFile {
+  path: string
+  role: KeyFileRole
+  importance: 'critical' | 'high' | 'medium' | 'low'
+  reason: string
+  size: number
+}
+
+export interface DiscoveryResult {
+  repoInfo: GitHubRepoInfo
+  tree: GitHubTreeNode[]
+  stack: DetectedStack
+  entryPoints: EntryPoint[]
+  keyFiles: KeyFile[]
+  totalFiles: number
+  totalDirectories: number
+  detectedAt: string
+}
+
+// ─── Analysis Phase Types ────────────────────────────────────────────────────
+
+export type ArchitecturePattern =
+  | 'monolith'
+  | 'microservices'
+  | 'monorepo'
+  | 'mvc'
+  | 'layered'
+  | 'event-driven'
+  | 'serverless'
+  | 'jamstack'
+  | 'library'
+  | 'unknown'
+
+export interface DependencyNode {
+  path: string
+  imports: string[]
+  importedBy: string[]
+  isExternal: boolean
+}
+
+export interface Convention {
+  name: string
+  description: string
+  examples: string[]
+}
+
+export interface ComplexityHotspot {
+  path: string
+  reason: string
+  score: number
+}
+
+export interface AnalysisResult {
+  pattern: ArchitecturePattern
+  dependencyGraph: DependencyNode[]
+  conventions: Convention[]
+  hotspots: ComplexityHotspot[]
+  analyzedFiles: string[]
+  analyzedAt: string
+}
+
+// ─── Guide Generation Types ──────────────────────────────────────────────────
+
+export interface StartHereFile {
+  path: string
+  reason: string
+  estimatedReadTime: number
+}
+
+export type ExplorationStepCategory =
+  | 'understand'
+  | 'trace'
+  | 'run'
+  | 'modify'
+  | 'test'
+
+export interface ExplorationStep {
+  order: number
+  title: string
+  description: string
+  files: string[]
+  category: ExplorationStepCategory
+  estimatedMinutes: number
+}
+
+export interface OnboardingGuide {
+  summary: string
+  diagram: string
+  startHere: StartHereFile[]
+  explorationPath: ExplorationStep[]
+  totalEstimatedMinutes: number
+  generatedAt: string
+}
+
+// ─── Q&A Types ───────────────────────────────────────────────────────────────
+
+export type QARole = 'user' | 'assistant'
+
+export interface QAMessage {
+  role: QARole
+  content: string
+  filesReferenced: string[]
+  timestamp: string
+}
+
+export interface QAContext {
+  analysisId: string
+  repoInfo: GitHubRepoInfo
+  stack: DetectedStack
+  guide: OnboardingGuide
+  history: QAMessage[]
+}
+
+// ─── Full Analysis Result ─────────────────────────────────────────────────────
+
+export type AnalysisStatus =
+  | 'queued'
+  | 'discovering'
+  | 'analyzing'
+  | 'generating'
+  | 'complete'
+  | 'failed'
+
+export interface FullAnalysisResult {
+  id: string
+  repoUrl: string
+  status: AnalysisStatus
+  discovery: DiscoveryResult | null
+  analysis: AnalysisResult | null
+  guide: OnboardingGuide | null
+  error: string | null
+  createdAt: string
+  completedAt: string | null
+}
