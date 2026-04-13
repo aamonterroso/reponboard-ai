@@ -50,6 +50,8 @@ export type StackCategory =
 
 export type RuntimeId =
   | 'nodejs'
+  | 'deno'
+  | 'bun'
   | 'python'
   | 'go'
   | 'rust'
@@ -91,6 +93,7 @@ export interface DetectedStack {
   hasDocker: boolean
   hasCi: boolean
   additionalLibraries: string[]
+  confidence: number
 }
 
 // ─── Discovery Phase Types ───────────────────────────────────────────────────
@@ -108,6 +111,7 @@ export interface EntryPoint {
   path: string
   kind: EntryPointKind
   reason: string
+  priority: number
 }
 
 export type KeyFileRole =
