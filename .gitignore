@@ -39,4 +39,4 @@ pnpm-debug.log*
 *.tsbuildinfo
 
 # OMC runtime state
-.omc/state/
+.omc/
