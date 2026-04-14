@@ -10,6 +10,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@reponboard/agent-core':
+        specifier: workspace:*
+        version: link:../../packages/agent-core
       next:
         specifier: ^15.0.0
         version: 15.5.15(react-dom@19.2.5(react@19.2.5))(react@19.2.5)

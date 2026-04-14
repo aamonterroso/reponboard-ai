@@ -3,7 +3,7 @@ import type {
   GitHubTreeNode,
   GitHubTreeNodeType,
   GitHubFileContent,
-} from './types.js'
+} from './types'
 
 const GITHUB_API_BASE = 'https://api.github.com'
 const CONCURRENCY_LIMIT = 5

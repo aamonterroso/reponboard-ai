@@ -133,10 +133,21 @@ export interface KeyFile {
   size: number
 }
 
+// ─── Repo Type Detection ─────────────────────────────────────────────────────
+
+export type RepoType = 'code' | 'docs' | 'awesome-list' | 'dotfiles' | 'data' | 'config'
+
+export interface RepoTypeResult {
+  type: RepoType
+  confidence: number
+  reason: string
+}
+
 export interface DiscoveryResult {
   repoInfo: GitHubRepoInfo
   tree: GitHubTreeNode[]
   stack: DetectedStack
+  repoType: RepoTypeResult
   entryPoints: EntryPoint[]
   keyFiles: KeyFile[]
   totalFiles: number

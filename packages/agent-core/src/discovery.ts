@@ -1,6 +1,6 @@
-import type { DiscoveryResult, GitHubFileContent, GitHubTreeNode } from './types.js'
-import { parseGitHubUrl, GitHubClient } from './github.js'
-import { detectStack, identifyEntryPoints, identifyKeyFiles } from './detection.js'
+import type { DiscoveryResult, GitHubFileContent, GitHubTreeNode } from './types'
+import { parseGitHubUrl, GitHubClient } from './github'
+import { detectStack, detectRepoType, identifyEntryPoints, identifyKeyFiles } from './detection'
 
 // Priority-ordered list of files to fetch for stack detection.
 // We cap at MAX_FETCH_FILES total.
@@ -126,15 +126,19 @@ export async function runDiscovery(
   // 8. Detect stack
   const stack = detectStack(tree, fileContents)
 
-  // 9. Identify entry points and key files
+  // 9. Detect repo type
+  const repoType = detectRepoType(tree, repoInfo.name, repoInfo.description)
+
+  // 10. Identify entry points and key files
   const entryPoints = identifyEntryPoints(tree, stack)
   const keyFiles = identifyKeyFiles(tree)
 
-  // 10. Return full result
+  // 11. Return full result
   return {
     repoInfo,
     tree,
     stack,
+    repoType,
     entryPoints,
     keyFiles,
     totalFiles,

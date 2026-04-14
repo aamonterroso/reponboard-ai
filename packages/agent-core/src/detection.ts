@@ -6,9 +6,11 @@ import type {
   GitHubTreeNode,
   KeyFile,
   KeyFileRole,
+  RepoType,
+  RepoTypeResult,
   RuntimeId,
   StackCategory,
-} from './types.js'
+} from './types'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -602,7 +604,91 @@ export function identifyKeyFiles(tree: GitHubTreeNode[]): KeyFile[] {
     }
   }
 
-  // Sort: critical → high → medium → low
+  // Sort: critical → high → medium → low, then cap at 12
   const order: Record<KeyFile['importance'], number> = { critical: 0, high: 1, medium: 2, low: 3 }
-  return results.sort((a, b) => order[a.importance] - order[b.importance])
+  return results.sort((a, b) => order[a.importance] - order[b.importance]).slice(0, 12)
+}
+
+// ─── detectRepoType ───────────────────────────────────────────────────────────
+
+const CODE_DIRS = new Set(['src', 'lib', 'app', 'pkg', 'cmd', 'core', 'server', 'client'])
+const DOC_EXTS = new Set(['.md', '.mdx', '.rst', '.txt'])
+const DATA_EXTS = new Set(['.json', '.csv', '.yaml', '.yml', '.xml', '.sql'])
+const CONFIG_FILES = new Set([
+  'package.json', 'tsconfig.json', 'go.mod', 'Cargo.toml', 'pyproject.toml',
+  'requirements.txt', 'pom.xml', 'build.gradle', 'Gemfile', 'composer.json',
+  '.eslintrc.js', '.eslintrc.json', 'eslint.config.mjs', '.prettierrc', 'biome.json',
+  'vite.config.ts', 'vite.config.js', 'webpack.config.js', 'rollup.config.js',
+  'next.config.ts', 'next.config.js', 'next.config.mjs', 'turbo.json',
+  'pnpm-workspace.yaml', 'docker-compose.yml', 'docker-compose.yaml', 'Dockerfile',
+  '.env.example', 'vercel.json', 'nx.json',
+])
+
+export function detectRepoType(
+  tree: GitHubTreeNode[],
+  repoName: string,
+  repoDescription: string | null,
+): RepoTypeResult {
+  const blobs = tree.filter((n) => n.type === 'blob')
+  const topDirs = new Set(
+    tree
+      .filter((n) => n.type === 'tree' && !n.path.includes('/'))
+      .map((n) => n.path),
+  )
+  const totalBlobs = blobs.length
+
+  const nameLower = repoName.toLowerCase()
+  const descLower = (repoDescription ?? '').toLowerCase()
+
+  // ── awesome-list ──────────────────────────────────────────────────────────
+  if (
+    nameLower.startsWith('awesome-') ||
+    descLower.includes('awesome list') ||
+    descLower.includes('curated list')
+  ) {
+    return { type: 'awesome-list' as RepoType, confidence: 0.95, reason: 'Repository name or description matches awesome-list pattern' }
+  }
+
+  // ── dotfiles ──────────────────────────────────────────────────────────────
+  const dotfileCount = blobs.filter((n) => {
+    const base = n.path.split('/').pop() ?? ''
+    return base.startsWith('.')
+  }).length
+
+  if (nameLower.includes('dotfiles') || (totalBlobs > 0 && dotfileCount / totalBlobs > 0.5)) {
+    return { type: 'dotfiles' as RepoType, confidence: 0.9, reason: 'Majority of files are dotfiles or repo name indicates dotfiles' }
+  }
+
+  const hasCodeDir = [...topDirs].some((d) => CODE_DIRS.has(d))
+
+  // ── docs ──────────────────────────────────────────────────────────────────
+  const docCount = blobs.filter((n) => {
+    const ext = n.path.slice(n.path.lastIndexOf('.'))
+    return DOC_EXTS.has(ext)
+  }).length
+
+  if (totalBlobs > 0 && docCount / totalBlobs > 0.7 && !hasCodeDir) {
+    return { type: 'docs' as RepoType, confidence: 0.85, reason: 'Over 70% of files are documentation and no code directories found' }
+  }
+
+  // ── data ──────────────────────────────────────────────────────────────────
+  const dataCount = blobs.filter((n) => {
+    const ext = n.path.slice(n.path.lastIndexOf('.'))
+    return DATA_EXTS.has(ext)
+  }).length
+
+  if (totalBlobs > 0 && dataCount / totalBlobs > 0.5 && !hasCodeDir) {
+    return { type: 'data' as RepoType, confidence: 0.8, reason: 'Over 50% of files are data files and no code directories found' }
+  }
+
+  // ── config ────────────────────────────────────────────────────────────────
+  const rootBlobs = blobs.filter((n) => !n.path.includes('/'))
+  const rootConfigCount = rootBlobs.filter((n) => CONFIG_FILES.has(n.path)).length
+
+  if (!hasCodeDir && rootBlobs.length > 0 && rootConfigCount / rootBlobs.length > 0.6) {
+    return { type: 'config' as RepoType, confidence: 0.7, reason: 'Root contains mostly configuration files with no code directories' }
+  }
+
+  // ── code (default) ────────────────────────────────────────────────────────
+  return { type: 'code' as RepoType, confidence: 0.75, reason: 'General code repository' }
 }

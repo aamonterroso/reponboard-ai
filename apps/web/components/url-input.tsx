@@ -1,6 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import type { DiscoveryResult } from '@reponboard/agent-core'
+import { AnalysisResult } from './analysis-result'
+
+const LOADING_STEPS = [
+  'Fetching repository info...',
+  'Scanning file structure...',
+  'Detecting stack...',
+  'Identifying key files...',
+]
 
 function isValidGitHubUrl(url: string): boolean {
   return /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/.test(url.trim())
@@ -10,6 +19,19 @@ export function UrlInput(): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadingStep, setLoadingStep] = useState(0)
+  const [result, setResult] = useState<DiscoveryResult | null>(null)
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadingStep(0)
+      return
+    }
+    const id = setInterval(() => {
+      setLoadingStep((s) => (s + 1) % LOADING_STEPS.length)
+    }, 1500)
+    return () => clearInterval(id)
+  }, [loading])
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>): void {
     setUrl(e.target.value)
@@ -31,17 +53,45 @@ export function UrlInput(): React.JSX.Element {
 
     setError(null)
     setLoading(true)
-    console.log('Analyzing:', trimmed)
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 2000))
+    try {
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: trimmed }),
+      })
 
-    setLoading(false)
+      const data: unknown = await response.json()
+
+      if (response.ok) {
+        const discovery = data as DiscoveryResult
+        console.log('Discovery result:', discovery)
+        setResult(discovery)
+      } else {
+        const errorData = data as { error?: string }
+        setError(errorData.error ?? 'An unexpected error occurred.')
+      }
+    } catch {
+      setError('Failed to reach the server. Please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
     if (e.key === 'Enter') {
       void handleAnalyze()
     }
+  }
+
+  function handleReset(): void {
+    setUrl('')
+    setError(null)
+    setResult(null)
+  }
+
+  if (result !== null) {
+    return <AnalysisResult result={result} onReset={handleReset} />
   }
 
   return (
@@ -85,7 +135,7 @@ export function UrlInput(): React.JSX.Element {
           {loading ? (
             <>
               <svg
-                className="animate-spin h-4 w-4 text-white"
+                className="animate-spin h-4 w-4 text-white shrink-0"
                 xmlns="http://www.w3.org/2000/svg"
                 fill="none"
                 viewBox="0 0 24 24"
@@ -105,7 +155,7 @@ export function UrlInput(): React.JSX.Element {
                   d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                 />
               </svg>
-              <span>Analyzing…</span>
+              <span className="text-sm truncate max-w-[160px]">{LOADING_STEPS[loadingStep]}</span>
             </>
           ) : (
             'Analyze'
