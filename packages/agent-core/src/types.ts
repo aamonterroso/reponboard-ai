@@ -249,6 +249,68 @@ export interface QAContext {
   history: QAMessage[]
 }
 
+// ─── LLM Analysis Types ──────────────────────────────────────────────────────
+
+export interface RefinedStack extends DetectedStack {
+  reasoning: string
+}
+
+export interface ExecutiveSummary {
+  oneLiner: string
+  overview: string
+  targetAudience: string
+}
+
+export interface KeyDirectory {
+  path: string
+  purpose: string
+}
+
+export interface DesignDecision {
+  title: string
+  description: string
+}
+
+export interface ArchitectureInsights {
+  pattern: ArchitecturePattern
+  keyDirectories: KeyDirectory[]
+  designDecisions: DesignDecision[]
+}
+
+export type LLMKeyFileCategory =
+  | 'entry-point'
+  | 'core-logic'
+  | 'configuration'
+  | 'infrastructure'
+  | 'data-model'
+  | 'utilities'
+  | 'tests'
+  | 'documentation'
+
+export interface LLMKeyFile {
+  path: string
+  whatItDoes: string
+  whyImportant: string
+  category: LLMKeyFileCategory
+}
+
+export interface ExplorationPathStep {
+  order: number
+  title: string
+  description: string
+  files: string[]
+  estimatedMinutes: number
+}
+
+export interface LLMAnalysisResult {
+  refinedStack: RefinedStack
+  executiveSummary: ExecutiveSummary
+  architectureInsights: ArchitectureInsights
+  keyFiles: LLMKeyFile[]
+  explorationPath: ExplorationPathStep[]
+  codebaseContext: string
+}
+
 // ─── Full Analysis Result ─────────────────────────────────────────────────────
 
 export type AnalysisStatus =
@@ -264,8 +326,7 @@ export interface FullAnalysisResult {
   repoUrl: string
   status: AnalysisStatus
   discovery: DiscoveryResult | null
-  analysis: AnalysisResult | null
-  guide: OnboardingGuide | null
+  llmAnalysis: LLMAnalysisResult | null
   error: string | null
   createdAt: string
   completedAt: string | null

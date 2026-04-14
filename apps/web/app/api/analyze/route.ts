@@ -1,4 +1,5 @@
-import { runDiscovery } from '@reponboard/agent-core'
+import { runDiscovery, runFullAnalysis } from '@reponboard/agent-core'
+import { randomUUID } from 'crypto'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -30,22 +31,48 @@ export async function POST(request: Request): Promise<NextResponse> {
     )
   }
 
+  const githubToken = process.env.GITHUB_TOKEN ?? undefined
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY
+  console.log('[analyze] ANTHROPIC_API_KEY present:', !!anthropicApiKey)
+
   try {
-    const result = await runDiscovery(
+    if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
+      // Full analysis: Layer 1 heuristics + Layer 2 LLM
+      console.log('[analyze] Calling runFullAnalysis...')
+      const result = await runFullAnalysis(repoUrl, githubToken, anthropicApiKey)
+      return NextResponse.json(result)
+    }
+
+    // Fallback: heuristics only (ANTHROPIC_API_KEY not configured)
+    const createdAt = new Date().toISOString()
+    const discovery = await runDiscovery(repoUrl, githubToken)
+    return NextResponse.json({
+      id: randomUUID(),
       repoUrl,
-      process.env.GITHUB_TOKEN ?? undefined,
-    )
-    return NextResponse.json(result)
+      status: 'complete',
+      discovery,
+      llmAnalysis: null,
+      error: null,
+      createdAt,
+      completedAt: new Date().toISOString(),
+    })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
 
-    // Treat URL parse errors as bad input
     if (
       message.includes('Invalid GitHub URL') ||
-      message.includes('parse') ||
-      message.includes('URL')
+      message.includes('Not a valid GitHub') ||
+      message.includes('INVALID_URL')
     ) {
       return NextResponse.json({ error: message }, { status: 400 })
+    }
+
+    if (message.includes('NOT_FOUND') || message.includes('not found')) {
+      return NextResponse.json({ error: message }, { status: 404 })
+    }
+
+    if (message.includes('RATE_LIMITED') || message.includes('rate limit')) {
+      return NextResponse.json({ error: message }, { status: 429 })
     }
 
     return NextResponse.json({ error: message }, { status: 500 })

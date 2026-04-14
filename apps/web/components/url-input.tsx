@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import type { DiscoveryResult } from '@reponboard/agent-core'
+import type { FullAnalysisResult } from '@reponboard/agent-core'
 import { AnalysisResult } from './analysis-result'
 
 const LOADING_STEPS = [
@@ -9,6 +9,8 @@ const LOADING_STEPS = [
   'Scanning file structure...',
   'Detecting stack...',
   'Identifying key files...',
+  'Analyzing with AI...',
+  'Generating insights...',
 ]
 
 function isValidGitHubUrl(url: string): boolean {
@@ -20,7 +22,7 @@ export function UrlInput(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadingStep, setLoadingStep] = useState(0)
-  const [result, setResult] = useState<DiscoveryResult | null>(null)
+  const [result, setResult] = useState<FullAnalysisResult | null>(null)
 
   useEffect(() => {
     if (!loading) {
@@ -64,9 +66,7 @@ export function UrlInput(): React.JSX.Element {
       const data: unknown = await response.json()
 
       if (response.ok) {
-        const discovery = data as DiscoveryResult
-        console.log('Discovery result:', discovery)
-        setResult(discovery)
+        setResult(data as FullAnalysisResult)
       } else {
         const errorData = data as { error?: string }
         setError(errorData.error ?? 'An unexpected error occurred.')
