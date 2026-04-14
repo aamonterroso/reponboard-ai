@@ -1,17 +1,11 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import type { FullAnalysisResult } from '@reponboard/agent-core'
+import { useState } from 'react'
+import type { FullAnalysisResult, AnalysisPhase } from '@reponboard/agent-core'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { AnalysisResult } from './analysis-result'
-
-const LOADING_STEPS = [
-  'Fetching repository info...',
-  'Scanning file structure...',
-  'Detecting stack...',
-  'Identifying key files...',
-  'Analyzing with AI...',
-  'Generating insights...',
-]
+import { AnalysisProgress } from './analysis-progress'
 
 function isValidGitHubUrl(url: string): boolean {
   return /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/.test(url.trim())
@@ -21,19 +15,10 @@ export function UrlInput(): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [loadingStep, setLoadingStep] = useState(0)
   const [result, setResult] = useState<FullAnalysisResult | null>(null)
-
-  useEffect(() => {
-    if (!loading) {
-      setLoadingStep(0)
-      return
-    }
-    const id = setInterval(() => {
-      setLoadingStep((s) => (s + 1) % LOADING_STEPS.length)
-    }, 1500)
-    return () => clearInterval(id)
-  }, [loading])
+  const [currentPhase, setCurrentPhase] = useState<AnalysisPhase | null>(null)
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
+  const [streamMessage, setStreamMessage] = useState('')
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>): void {
     setUrl(e.target.value)
@@ -63,13 +48,60 @@ export function UrlInput(): React.JSX.Element {
         body: JSON.stringify({ repoUrl: trimmed }),
       })
 
-      const data: unknown = await response.json()
-
-      if (response.ok) {
-        setResult(data as FullAnalysisResult)
-      } else {
+      if (!response.ok) {
+        const data: unknown = await response.json()
         const errorData = data as { error?: string }
         setError(errorData.error ?? 'An unexpected error occurred.')
+        return
+      }
+
+      const contentType = response.headers.get('Content-Type') ?? ''
+
+      if (contentType.includes('application/x-ndjson') && response.body !== null) {
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+
+          for (const line of lines) {
+            if (line.trim() === '') continue
+            try {
+              const event = JSON.parse(line) as { phase: string; result?: FullAnalysisResult; error?: string; message?: string; progress?: unknown }
+              console.log('[stream event]', event)
+              if (event.phase === 'discovery') {
+                setCurrentPhase('discovery')
+                setStreamMessage(event.message ?? '')
+              } else if (event.phase === 'fetching') {
+                setCurrentPhase('fetching')
+                setStreamMessage(event.message ?? '')
+                if (event.progress) setProgress(event.progress as { current: number; total: number })
+              } else if (event.phase === 'analyzing') {
+                setCurrentPhase('analyzing')
+                setStreamMessage(event.message ?? '')
+              } else if (event.phase === 'complete' && event.result !== undefined) {
+                setCurrentPhase('complete')
+                setResult(event.result)
+                return
+              } else if (event.phase === 'error' && event.error !== undefined) {
+                setError(event.error)
+                return
+              }
+            } catch {
+              // skip malformed lines
+            }
+          }
+        }
+      } else {
+        // Fallback: non-streaming JSON response
+        const data: unknown = await response.json()
+        setResult(data as FullAnalysisResult)
       }
     } catch {
       setError('Failed to reach the server. Please try again.')
@@ -88,6 +120,9 @@ export function UrlInput(): React.JSX.Element {
     setUrl('')
     setError(null)
     setResult(null)
+    setCurrentPhase(null)
+    setProgress(null)
+    setStreamMessage('')
   }
 
   if (result !== null) {
@@ -97,7 +132,7 @@ export function UrlInput(): React.JSX.Element {
   return (
     <div className="w-full flex flex-col gap-3">
       <div className="flex gap-2">
-        <input
+        <Input
           type="url"
           value={url}
           onChange={handleChange}
@@ -106,62 +141,36 @@ export function UrlInput(): React.JSX.Element {
           disabled={loading}
           aria-label="GitHub repository URL"
           aria-invalid={error !== null}
-          className="
-            flex-1 h-12 px-4
-            bg-zinc-900 border border-zinc-700
-            text-zinc-100 placeholder-zinc-500
-            rounded-lg text-base font-mono
-            focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent
-            disabled:opacity-50 disabled:cursor-not-allowed
-            transition-colors
-          "
+          className="flex-1 h-12 font-mono text-base"
         />
-        <button
+        <Button
           type="button"
           onClick={() => void handleAnalyze()}
           disabled={loading}
-          className="
-            h-12 px-6
-            bg-emerald-600 hover:bg-emerald-500
-            text-white font-medium
-            rounded-lg
-            disabled:opacity-50 disabled:cursor-not-allowed
-            focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 focus:ring-offset-zinc-950
-            transition-colors
-            flex items-center gap-2
-            shrink-0
-          "
+          size="lg"
+          className="shrink-0"
         >
           {loading ? (
             <>
-              <svg
-                className="animate-spin h-4 w-4 text-white shrink-0"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                />
+              <svg className="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              <span className="text-sm truncate max-w-[160px]">{LOADING_STEPS[loadingStep]}</span>
+              <span className="text-sm">Analyzing...</span>
             </>
           ) : (
             'Analyze'
           )}
-        </button>
+        </Button>
       </div>
+
+      {loading && currentPhase !== null && (
+        <AnalysisProgress
+          currentPhase={currentPhase}
+          progress={progress ?? undefined}
+          message={streamMessage}
+        />
+      )}
 
       {error !== null && (
         <p role="alert" className="text-sm text-red-400 text-left">

@@ -1,1 +1,42 @@
 @import "tailwindcss";
+
+/* ─── Base theme ────────────────────────────────────────────────────────────── */
+
+:root {
+  --background: #09090b;       /* zinc-950 */
+  --foreground: #fafafa;       /* zinc-50 */
+  --border: #27272a;           /* zinc-800 */
+  --muted: #71717a;            /* zinc-500 */
+  --muted-foreground: #a1a1aa; /* zinc-400 */
+  --accent: #10b981;           /* emerald-500 */
+  --card: #18181b;             /* zinc-900 */
+  --card-border: #27272a;      /* zinc-800 */
+  --radius: 0.5rem;
+}
+
+/* ─── Animations ────────────────────────────────────────────────────────────── */
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes fade-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+.animate-fade-slide-up {
+  animation: fade-slide-up 0.3s ease-out forwards;
+  opacity: 0;
+}

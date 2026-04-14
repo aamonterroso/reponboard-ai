@@ -331,3 +331,14 @@ export interface FullAnalysisResult {
   createdAt: string
   completedAt: string | null
 }
+
+// ─── Streaming Event Types ────────────────────────────────────────────────────
+
+export type AnalysisPhase = 'discovery' | 'fetching' | 'analyzing' | 'complete' | 'error'
+
+export type AnalysisProgressEvent =
+  | { phase: 'discovery'; message: string }
+  | { phase: 'fetching'; message: string; progress: { current: number; total: number } }
+  | { phase: 'analyzing'; message: string }
+  | { phase: 'complete'; result: FullAnalysisResult }
+  | { phase: 'error'; error: string }

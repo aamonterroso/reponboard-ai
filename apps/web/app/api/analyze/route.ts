@@ -1,8 +1,8 @@
-import { runDiscovery, runFullAnalysis } from '@reponboard/agent-core'
+import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
 import { randomUUID } from 'crypto'
 import { NextResponse } from 'next/server'
 
-export async function POST(request: Request): Promise<NextResponse> {
+export async function POST(request: Request): Promise<NextResponse | Response> {
   let body: unknown
   try {
     body = await request.json()
@@ -35,15 +35,35 @@ export async function POST(request: Request): Promise<NextResponse> {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
   console.log('[analyze] ANTHROPIC_API_KEY present:', !!anthropicApiKey)
 
-  try {
-    if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
-      // Full analysis: Layer 1 heuristics + Layer 2 LLM
-      console.log('[analyze] Calling runFullAnalysis...')
-      const result = await runFullAnalysis(repoUrl, githubToken, anthropicApiKey)
-      return NextResponse.json(result)
-    }
+  if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
+    // Full analysis: streaming NDJSON
+    console.log('[analyze] Calling runFullAnalysisStream...')
+    const llmMode = (process.env.LLM_MODE ?? 'production') as 'development' | 'production'
+    const generator = runFullAnalysisStream(repoUrl, githubToken, anthropicApiKey, llmMode)
+    const encoder = new TextEncoder()
 
-    // Fallback: heuristics only (ANTHROPIC_API_KEY not configured)
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const event of generator) {
+            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+          }
+        } finally {
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+        'Cache-Control': 'no-cache',
+      },
+    })
+  }
+
+  // Fallback: heuristics only (ANTHROPIC_API_KEY not configured)
+  try {
     const createdAt = new Date().toISOString()
     const discovery = await runDiscovery(repoUrl, githubToken)
     return NextResponse.json({

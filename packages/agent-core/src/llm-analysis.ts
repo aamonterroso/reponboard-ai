@@ -144,33 +144,115 @@ The JSON must match this exact structure:
   "codebaseContext": "string — a dense 2-3 paragraph summary of the entire codebase written to serve as context for answering follow-up questions. Reference actual file names, patterns, and design choices."
 }
 
-Be specific and concrete. Reference actual file names, function names, and patterns you observe. Avoid generic boilerplate descriptions.`
+Be specific and concrete. Reference actual file names, function names, and patterns you observe. Avoid generic boilerplate descriptions.
+
+IMPORTANT SIZE CONSTRAINTS (to ensure complete responses):
+- keyFiles: Maximum 10 entries
+- explorationPath: Maximum 5 steps
+- keyDirectories: Maximum 6 entries
+- designDecisions: Maximum 4 entries
+- additionalLibraries: Maximum 8 entries
+- All description fields: Maximum 2 sentences each
+
+Prioritize quality over quantity. Include only the most important items.`
 
 // ─── JSON Parsing ─────────────────────────────────────────────────────────────
 
+function repairTruncatedJson(json: string): string {
+  let repaired = json.trim()
+
+  // Remove incomplete trailing elements
+  repaired = repaired.replace(/,\s*"[^"]*$/, '')          // unclosed string key
+  repaired = repaired.replace(/,\s*"[^"]*":\s*$/, '')     // key without value
+  repaired = repaired.replace(/,\s*"[^"]*":\s*"[^"]*$/, '') // unclosed string value
+  repaired = repaired.replace(/,\s*\d+\.?\d*$/, '')       // incomplete number
+  repaired = repaired.replace(/,\s*$/, '')                 // trailing comma
+  repaired = repaired.replace(/:\s*$/, ': null')           // key with no value
+
+  // Close unclosed arrays
+  const openBrackets = (repaired.match(/\[/g) || []).length
+  const closeBrackets = (repaired.match(/\]/g) || []).length
+  repaired += ']'.repeat(Math.max(0, openBrackets - closeBrackets))
+
+  // Close unclosed objects
+  const openBraces = (repaired.match(/\{/g) || []).length
+  const closeBraces = (repaired.match(/\}/g) || []).length
+  repaired += '}'.repeat(Math.max(0, openBraces - closeBraces))
+
+  return repaired
+}
+
 function parseResponse(text: string): LLMAnalysisResult {
   const stripped = text.trim()
-  // handle responses wrapped in markdown code fences
+
+  // Strategy 1: extract from markdown fence
   const fenceMatch = stripped.match(/```(?:json)?\s*([\s\S]*?)```/)
-  const jsonText = fenceMatch?.[1]?.trim() ?? stripped
-  return JSON.parse(jsonText) as LLMAnalysisResult
+  if (fenceMatch?.[1]) {
+    try {
+      return JSON.parse(fenceMatch[1].trim()) as LLMAnalysisResult
+    } catch {
+      // try repair
+      try {
+        return JSON.parse(repairTruncatedJson(fenceMatch[1].trim())) as LLMAnalysisResult
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  // Strategy 2: find first { and attempt to extract/repair
+  const startIdx = stripped.indexOf('{')
+  if (startIdx !== -1) {
+    const jsonCandidate = stripped.slice(startIdx)
+
+    // Try direct parse first
+    const objectMatch = jsonCandidate.match(/\{[\s\S]*\}/)
+    if (objectMatch) {
+      try {
+        return JSON.parse(objectMatch[0]) as LLMAnalysisResult
+      } catch {
+        // fall through to repair
+      }
+    }
+
+    // Repair truncated JSON
+    try {
+      return JSON.parse(repairTruncatedJson(jsonCandidate)) as LLMAnalysisResult
+    } catch {
+      // fall through
+    }
+  }
+
+  // Last resort: repair raw text
+  return JSON.parse(repairTruncatedJson(stripped)) as LLMAnalysisResult
 }
+
+// ─── Model Configuration ──────────────────────────────────────────────────────
+
+const MODELS = {
+  development: 'claude-haiku-4-5-20251001',
+  production: 'claude-sonnet-4-20250514',
+} as const
+
+export type LLMMode = keyof typeof MODELS
 
 // ─── Main Function ────────────────────────────────────────────────────────────
 
 export async function analyzeWithLLM(
   discoveryResult: DiscoveryResult,
   fileContents: Map<string, string>,
-  apiKey: string
+  apiKey: string,
+  mode: LLMMode = 'production'
 ): Promise<LLMAnalysisResult> {
   const client = new Anthropic({ apiKey })
   const userPrompt = buildUserPrompt(discoveryResult, fileContents)
+  const model = MODELS[mode]
 
   async function attempt(): Promise<LLMAnalysisResult> {
-    console.log('[LLM] Calling Claude API...')
+    console.log(`[LLM] Calling Claude API (model: ${model})...`)
 
     const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model,
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],

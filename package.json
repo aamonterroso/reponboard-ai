@@ -2,7 +2,7 @@
   "name": "reponboard-ai",
   "version": "0.1.0",
   "private": true,
-  "description": "Reponboard any codebase in 5 minutes — AI-powered onboarding agent",
+  "description": "Onboard any codebase in 5 minutes — AI-powered onboarding agent",
   "author": "Allan Monterroso <allan.monterroso1@gmail.com>",
   "license": "MIT",
   "repository": {

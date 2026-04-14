@@ -3,7 +3,7 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Reponboard AI',
-  description: 'Reponboard any codebase in 5 minutes',
+  description: 'Onboard any codebase in 5 minutes',
 }
 
 export default function RootLayout({

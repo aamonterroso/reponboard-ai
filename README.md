@@ -2,12 +2,10 @@
 
 > **AI-powered onboarding agent** — Reponboard any codebase in 5 minutes
 
-The codebase tour you never got
+The codebase tour you never got.
 
 [![Demo](https://img.shields.io/badge/Live_Demo-Visit-blue?style=for-the-badge)](https://reponboard.vercel.app)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-
-![Demo GIF](docs/demo.gif)
 
 ---
 
@@ -61,12 +59,12 @@ GitHub URL
     │
     ▼
 ┌─────────────────────┐
-│  2. DEEP ANALYSIS   │  Map dependencies, identify patterns, find hotspots
+│  2. DEEP ANALYSIS   │  AI analyzes patterns, architecture, key files
 └─────────────────────┘
     │
     ▼
 ┌─────────────────────┐
-│  3. GUIDE GENERATION│  Summary, diagram, "start here" recommendations
+│  3. GUIDE OUTPUT    │  Summary, diagram, "start here" recommendations
 └─────────────────────┘
     │
     ▼
@@ -80,7 +78,7 @@ GitHub URL
 | Layer | Tech |
 |-------|------|
 | Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS |
-| AI Agent | Claude API with tool use (autonomous multi-step reasoning) |
+| AI Agent | Claude API (Haiku for dev, Sonnet for prod) |
 | Repo Parsing | GitHub API (tree endpoint) |
 | Diagrams | Mermaid.js |
 | Deploy | Vercel |
@@ -93,19 +91,26 @@ GitHub URL
 reponboard-ai/
 ├── apps/
 │   └── web/                 # Next.js application
-│       ├── app/             # App Router pages
-│       ├── components/      # React components
-│       └── lib/             # Utilities and API clients
+│       ├── app/             # App Router pages + API routes
+│       └── components/      # React components
 ├── packages/
 │   └── agent-core/          # Agent logic (reusable)
 │       └── src/
-│           ├── discovery.ts # Phase 1: Repo discovery
-│           ├── analysis.ts  # Phase 2: Deep analysis
-│           ├── guide.ts     # Phase 3: Guide generation
-│           └── qa.ts        # Phase 4: Q&A
-├── docs/
-│   └── ARCHITECTURE.md      # System design documentation
-└── examples/                # Sample outputs
+│           ├── discovery.ts     # Layer 1: Heuristic discovery
+│           ├── llm-analysis.ts  # Layer 2: Claude analysis
+│           └── full-analysis.ts # Orchestrator (streaming)
+└── CLAUDE.md                # Project documentation
+```
+
+---
+
+## ⚙️ Environment Variables
+
+```bash
+# .env.local
+ANTHROPIC_API_KEY=sk-ant-...   # Required for AI analysis
+GITHUB_TOKEN=ghp_...           # Optional: increases rate limit 60 → 5000/hr
+LLM_MODE=development           # development (Haiku) | production (Sonnet)
 ```
 
 ---
@@ -113,17 +118,10 @@ reponboard-ai/
 ## 🛠️ Development
 
 ```bash
-# Run development server
-pnpm dev
-
-# Type checking
-pnpm typecheck
-
-# Linting
-pnpm lint
-
-# Run tests
-pnpm test
+pnpm dev          # Start dev server
+pnpm build        # Production build
+pnpm typecheck    # Type checking
+pnpm lint         # Linting
 ```
 
 ---

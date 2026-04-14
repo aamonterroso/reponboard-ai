@@ -18,351 +18,169 @@ reponboard-ai/
 │       │   ├── page.tsx           # Landing page with URL input
 │       │   ├── layout.tsx         # Root layout
 │       │   ├── globals.css        # Global styles + Tailwind
-│       │   ├── api/
-│       │   │   └── analyze/
-│       │   │       └── route.ts   # Main analysis API endpoint
-│       │   └── analysis/
-│       │       └── [id]/
-│       │           └── page.tsx   # Analysis results page
-│       ├── components/
-│       │   ├── url-input.tsx      # GitHub URL input component
-│       │   ├── analysis-view.tsx  # Results display
-│       │   ├── mermaid-diagram.tsx # Mermaid renderer
-│       │   └── qa-chat.tsx        # Q&A interface
-│       └── lib/
-│           ├── api.ts             # API client
-│           └── utils.ts           # Utilities
+│       │   └── api/
+│       │       └── analyze/
+│       │           └── route.ts   # Main analysis API (streaming NDJSON)
+│       └── components/
+│           ├── url-input.tsx      # GitHub URL input + stream consumer
+│           ├── analysis-result.tsx # Results display
+│           └── mermaid-diagram.tsx # Mermaid renderer
 ├── packages/
 │   └── agent-core/          # Reusable agent logic (TypeScript)
 │       └── src/
 │           ├── index.ts           # Main exports
-│           ├── types.ts           # TypeScript types
+│           ├── types.ts           # TypeScript types + streaming events
 │           ├── github.ts          # GitHub API client
-│           ├── discovery.ts       # Phase 1: Repo discovery
-│           ├── analysis.ts        # Phase 2: Deep analysis
-│           ├── guide.ts           # Phase 3: Guide generation
-│           └── qa.ts              # Phase 4: Q&A handler
-├── docs/
-│   ├── ARCHITECTURE.md
-│   └── CONTRIBUTING.md
-├── examples/                # Sample analysis outputs
+│           ├── discovery.ts       # Layer 1: Heuristic discovery
+│           ├── llm-analysis.ts    # Layer 2: Claude LLM analysis
+│           └── full-analysis.ts   # Orchestrator (sync + streaming)
 ├── package.json             # Root package.json
 ├── pnpm-workspace.yaml      # pnpm workspace config
-├── turbo.json               # Turborepo config (optional)
 └── CLAUDE.md                # This file
 ```
 
-### Agent Phases
+### Analysis Pipeline
 
-**Phase 1: Discovery**
-- Parse GitHub URL → extract owner/repo
-- Fetch repo metadata (description, stars, language, topics)
-- Get full tree structure (recursive)
-- Detect stack from config files (package.json, requirements.txt, etc.)
-- Identify entry points and key files
+```
+GitHub URL
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  LAYER 1: DISCOVERY (heuristics, no LLM)                │
+│  - Parse URL → fetch repo metadata                      │
+│  - Get tree structure (recursive)                       │
+│  - Detect stack from config files                       │
+│  - Identify entry points + key files                    │
+└─────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  LAYER 2: LLM ANALYSIS (Claude)                         │
+│  - Receives discovery + key file contents               │
+│  - Refines stack detection                              │
+│  - Generates executive summary                          │
+│  - Creates architecture insights                        │
+│  - Recommends exploration path                          │
+└─────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  STREAMING OUTPUT (NDJSON)                              │
+│  - Phase events: discovery → fetching → analyzing       │
+│  - Progress updates with counts                         │
+│  - Final result or error                                │
+└─────────────────────────────────────────────────────────┘
+```
 
-**Phase 2: Deep Analysis**
-- Fetch content of key files
-- Map internal dependencies
-- Detect architectural patterns (MVC, microservices, monorepo, etc.)
-- Identify complexity hotspots
-- Extract conventions (naming, structure, testing)
+### Streaming Event Format
 
-**Phase 3: Guide Generation**
-- Generate executive summary with Claude
-- Create architecture diagram (Mermaid)
-- Recommend "start here" files with reasons
-- Suggest exploration path with time estimates
+Progress events:
+- `{ "phase": "discovery", "message": "Scanning repository structure..." }`
+- `{ "phase": "fetching", "message": "Fetching 8 key files...", "progress": { "current": 3, "total": 8 } }`
+- `{ "phase": "analyzing", "message": "AI is analyzing the codebase..." }`
 
-**Phase 4: Interactive Q&A**
-- User asks questions about the codebase
-- Agent fetches relevant files on-demand
-- Responds with context-aware answers
+Terminal events:
+- `{ "phase": "complete", "result": { /* FullAnalysisResult */ } }`
+- `{ "phase": "error", "error": "Rate limited by GitHub API" }`
 
 ## Tech Stack
 
 | Layer | Tech | Notes |
 |-------|------|-------|
 | Framework | Next.js 15 | App Router, RSC-first |
-| Language | TypeScript | Strict mode enabled |
-| Styling | Tailwind CSS | Dark theme, dev-friendly |
-| AI | Claude API | claude-sonnet-4-20250514 with tool use |
+| Language | TypeScript | Strict mode, no `any` |
+| Styling | Tailwind CSS | Dark theme (zinc-950/zinc-100) |
+| AI | Claude API | Haiku (dev), Sonnet (prod) |
 | Diagrams | Mermaid.js | Client-side rendering |
 | Deploy | Vercel | Free tier |
-| Monorepo | pnpm workspaces | Simple, no turborepo needed initially |
-
-## Development Commands
-
-```bash
-# Install dependencies
-pnpm install
-
-# Start development server
-pnpm dev
-
-# Production build
-pnpm build
-
-# Type checking
-pnpm typecheck
-
-# Linting
-pnpm lint
-
-# Run tests
-pnpm test
-```
+| Monorepo | pnpm workspaces | Simple, efficient |
 
 ## Environment Variables
 
 ```bash
 # .env.local
-ANTHROPIC_API_KEY=sk-ant-...   # Required - Claude API key
-GITHUB_TOKEN=ghp_...           # Optional - increases rate limit from 60 to 5000 req/hr
+ANTHROPIC_API_KEY=sk-ant-...   # Required for LLM analysis
+GITHUB_TOKEN=ghp_...           # Optional: 60 → 5000 req/hr
+LLM_MODE=development           # development (Haiku) | production (Sonnet)
+```
+
+## Development Commands
+
+```bash
+pnpm install      # Install dependencies
+pnpm dev          # Start dev server
+pnpm build        # Production build
+pnpm typecheck    # Type checking
+pnpm lint         # Linting
 ```
 
 ## Code Style Guidelines
 
 ### General
-- Use `async/await` over `.then()` chains
-- Prefer named exports: `export function foo()` not `export default`
-- TypeScript strict mode — no `any` types, ever
+- `async/await` over `.then()` chains
+- Named exports: `export function foo()` not `export default`
+- TypeScript strict mode — no `any` types
 - Explicit return types on functions
 
 ### React/Next.js
 - Server Components by default
-- Add `'use client'` only when needed (interactivity, hooks)
-- Use `next/navigation` for routing, not `next/router`
-- Collocate components with their pages when page-specific
+- `'use client'` only when needed
+- Use `next/navigation` for routing
 
 ### Styling
-- Tailwind only — no CSS modules, no styled-components
-- Dark theme by default (bg-zinc-950, text-zinc-100)
-- Monospace font for code/paths: `font-mono`
-- Consistent spacing scale: 4, 8, 12, 16, 24, 32, 48
+- Tailwind only — no CSS modules
+- Dark theme default: `bg-zinc-950`, `text-zinc-100`
+- Accent: `emerald-500` (CTAs), `blue-500` (links)
+- Monospace for code: `font-mono`
 
 ### Error Handling
-- Always use try/catch with typed errors
-- Create custom error classes for different failure modes
-- Return structured errors from API routes, never throw
-
-## API Design
-
-### POST /api/analyze
-
-Starts analysis of a repository.
-
-**Request:**
-```json
-{
-  "repoUrl": "https://github.com/vercel/next.js"
-}
-```
-
-**Response (streaming JSON):**
-```json
-{
-  "id": "analysis_abc123",
-  "status": "discovering",
-  "repoInfo": {
-    "owner": "vercel",
-    "name": "next.js",
-    "description": "The React Framework",
-    "stars": 120000
-  }
-}
-```
-
-Status progresses: `discovering` → `analyzing` → `generating` → `complete`
-
-Each status update streams as a new JSON object.
-
-### GET /api/analysis/[id]
-
-Retrieves a completed analysis.
-
-### POST /api/analysis/[id]/qa
-
-Sends a question about the analyzed codebase.
-
-**Request:**
-```json
-{
-  "question": "How does the routing system work?"
-}
-```
-
-**Response:**
-```json
-{
-  "answer": "The routing system in Next.js...",
-  "filesReferenced": ["app/router.ts", "lib/navigation.ts"]
-}
-```
+- Always try/catch with typed errors
+- Return structured errors from API routes
+- Graceful degradation when LLM fails
 
 ## Key Implementation Details
 
-### GitHub API Usage
-
-Use tree endpoint for efficiency — don't clone repos:
-```typescript
-GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1
-```
-
-Rate limits:
-- Without token: 60 requests/hour
-- With token: 5,000 requests/hour
-
-### Stack Detection Logic
-
-Priority order for detection:
-1. `package.json` → Node.js ecosystem
-   - Check dependencies for framework (next, react, vue, etc.)
-2. `requirements.txt` / `pyproject.toml` → Python
-3. `go.mod` → Go
-4. `Cargo.toml` → Rust
-5. `pom.xml` / `build.gradle` → Java
-
-### Claude Tool Definitions
+### Dual Model Support
 
 ```typescript
-const tools = [
-  {
-    name: "fetch_file",
-    description: "Fetch the content of a specific file from the repository",
-    input_schema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "File path relative to repo root" }
-      },
-      required: ["path"]
-    }
-  },
-  {
-    name: "search_code", 
-    description: "Search for patterns or keywords in the codebase",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query" },
-        filePattern: { type: "string", description: "Glob pattern to filter files" }
-      },
-      required: ["query"]
-    }
-  },
-  {
-    name: "list_directory",
-    description: "List contents of a directory",
-    input_schema: {
-      type: "object", 
-      properties: {
-        path: { type: "string", description: "Directory path" }
-      },
-      required: ["path"]
-    }
-  }
-]
+const MODELS = {
+  development: 'claude-haiku-4-5-20251001',  // Fast, cheap
+  production: 'claude-sonnet-4-20250514',    // Accurate, robust
+}
 ```
 
-### Mermaid Diagram Generation
+Set via `LLM_MODE` env var. Haiku for local dev, Sonnet for prod.
 
-The agent generates architecture diagrams in Mermaid syntax:
+### JSON Repair for Truncated Responses
 
-```mermaid
-graph TD
-    A[app/] --> B[api/]
-    A --> C[components/]
-    A --> D[lib/]
-    B --> E[analyze/route.ts]
-    C --> F[url-input.tsx]
-    D --> G[github.ts]
-```
+Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
+- Unclosed strings/arrays/objects
+- Trailing commas
+- Missing brackets
 
-Render client-side using `mermaid` npm package.
+### Key Files Limit
 
-## UI/UX Guidelines
+`MAX_KEY_FILES_FOR_LLM = 12` — caps files sent to LLM to keep prompt manageable.
 
-### Visual Design
-- Dark theme: zinc-950 background, zinc-100 text
-- Accent color: emerald-500 for CTAs, blue-500 for links
-- Monospace for code: JetBrains Mono or Fira Code
-- Sans-serif for UI: Inter or system fonts
+## Current Status
 
-### Components
-- URL input: large, centered, prominent
-- Progress indicator: show current phase with steps
-- Results: tabbed interface (Summary | Diagram | Files | Q&A)
-- Code blocks: syntax highlighted, copy button
+### Completed
+- ✅ Two-layer analysis (heuristics + LLM)
+- ✅ Dual model support (Haiku dev / Sonnet prod)
+- ✅ JSON truncation repair
+- ✅ Key files limit (top 12)
 
-### Interactions
-- Streaming responses: show text as it arrives
-- Loading states: skeleton UI, not spinners
-- Errors: inline, actionable messages
+### In Progress
+- 🔄 Streaming + real loading states
 
-## Testing Strategy
+### Backlog
+1. UI polish with shadcn (2-3 hrs)
+2. Collapsible sections (1 hr)
+3. Exploration cache (1-2 hrs)
+4. CLI wrapper (2 hrs)
 
-### Unit Tests (Vitest)
-- `agent-core` functions: parsing, detection, analysis
-- API route handlers
-- Utility functions
-
-### Integration Tests
-- Full analysis flow with mocked GitHub API
-- Q&A conversation flow
-
-### E2E Tests (optional, Playwright)
-- Landing page → analysis → results flow
-- Error handling scenarios
-
-## Performance Considerations
-
-1. **GitHub API Efficiency**
-   - Use tree endpoint (single request for full structure)
-   - Batch file fetches (max 5 concurrent)
-   - Cache by repo+SHA
-
-2. **Response Streaming**
-   - Stream analysis progress to client
-   - Don't wait for full completion
-
-3. **Bundle Size**
-   - Lazy load Mermaid renderer
-   - Code split analysis page
-
-## Security Notes
-
-1. **API Key Protection**
-   - ANTHROPIC_API_KEY server-side only
-   - Never expose in client bundle
-
-2. **Input Validation**
-   - Validate GitHub URLs server-side
-   - Sanitize repo paths (no path traversal)
-
-3. **Rate Limiting**
-   - Implement per-IP rate limiting
-   - Max 10 analyses per hour per IP
-
-4. **XSS Prevention**
-   - Sanitize Mermaid diagram output
-   - Escape code block content
-
-## Common Tasks for Claude Code
-
-### "Create the initial project scaffold"
-Set up Next.js 15 app in apps/web, agent-core package, TypeScript configs, Tailwind, ESLint.
-
-### "Implement the discovery phase"
-Create github.ts client, stack detection logic, entry point identification.
-
-### "Build the landing page"
-Dark theme, centered URL input, "Analyze" button, recent analyses list.
-
-### "Add the analysis API route"
-Streaming response, phase progression, error handling.
-
-### "Create the results page"
-Tabbed interface, Mermaid diagram, file tree, Q&A chat.
+### Tech Debt
+- Migrate `llm-analysis.ts` from text parsing to `tool_use` for structured outputs
 
 ## Resources
 
