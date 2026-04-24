@@ -236,48 +236,82 @@ const MODELS = {
 
 export type LLMMode = keyof typeof MODELS
 
-// ─── Main Function ────────────────────────────────────────────────────────────
+// ─── Streaming Events ─────────────────────────────────────────────────────────
+
+export type LLMStreamEvent =
+  | { type: 'progress'; chars: number }
+  | { type: 'result'; result: LLMAnalysisResult }
+
+const PROGRESS_EMIT_INTERVAL_CHARS = 400
+
+// ─── Streaming Main Function ──────────────────────────────────────────────────
+
+export async function* analyzeWithLLMStream(
+  discoveryResult: DiscoveryResult,
+  fileContents: Map<string, string>,
+  apiKey: string,
+  mode: LLMMode = 'production',
+): AsyncGenerator<LLMStreamEvent> {
+  const client = new Anthropic({ apiKey })
+  const userPrompt = buildUserPrompt(discoveryResult, fileContents)
+  const model = MODELS[mode]
+
+  async function* attempt(): AsyncGenerator<LLMStreamEvent> {
+    const stream = await client.messages.create({
+      model,
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userPrompt }],
+      stream: true,
+    })
+
+    let text = ''
+    let lastEmitChars = 0
+
+    for await (const event of stream) {
+      if (
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'text_delta'
+      ) {
+        text += event.delta.text
+        if (text.length - lastEmitChars >= PROGRESS_EMIT_INTERVAL_CHARS) {
+          lastEmitChars = text.length
+          yield { type: 'progress', chars: text.length }
+        }
+      }
+    }
+
+    if (text === '') {
+      throw new Error('Claude returned no text content')
+    }
+
+    yield { type: 'result', result: parseResponse(text) }
+  }
+
+  try {
+    yield* attempt()
+  } catch (firstError) {
+    // Retry once on JSON parse failure or transient error
+    try {
+      yield* attempt()
+    } catch (secondError) {
+      const msg = secondError instanceof Error ? secondError.message : String(secondError)
+      console.error('[LLM] Failed after 2 attempts:', firstError, secondError)
+      throw new Error(`analyzeWithLLM failed after 2 attempts. Last error: ${msg}`)
+    }
+  }
+}
+
+// ─── Non-streaming Convenience Wrapper ────────────────────────────────────────
 
 export async function analyzeWithLLM(
   discoveryResult: DiscoveryResult,
   fileContents: Map<string, string>,
   apiKey: string,
-  mode: LLMMode = 'production'
+  mode: LLMMode = 'production',
 ): Promise<LLMAnalysisResult> {
-  const client = new Anthropic({ apiKey })
-  const userPrompt = buildUserPrompt(discoveryResult, fileContents)
-  const model = MODELS[mode]
-
-  async function attempt(): Promise<LLMAnalysisResult> {
-    console.log(`[LLM] Calling Claude API (model: ${model})...`)
-
-    const message = await client.messages.create({
-      model,
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userPrompt }],
-    })
-
-    console.log('[LLM] Response received, length:', message.content.find((b) => b.type === 'text')?.text?.length)
-
-    const textBlock = message.content.find((block) => block.type === 'text')
-    if (!textBlock || textBlock.type !== 'text') {
-      throw new Error('Claude returned no text content')
-    }
-
-    return parseResponse(textBlock.text)
+  for await (const event of analyzeWithLLMStream(discoveryResult, fileContents, apiKey, mode)) {
+    if (event.type === 'result') return event.result
   }
-
-  try {
-    return await attempt()
-  } catch {
-    // retry once on JSON parse failure or transient error
-    try {
-      return await attempt()
-    } catch (secondError) {
-      console.error('[LLM] Parse error:', secondError)
-      const msg = secondError instanceof Error ? secondError.message : String(secondError)
-      throw new Error(`analyzeWithLLM failed after 2 attempts. Last error: ${msg}`)
-    }
-  }
+  throw new Error('analyzeWithLLM: stream ended without producing a result')
 }

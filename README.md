@@ -123,8 +123,15 @@ reponboard-ai/
 |-----------|---------|
 | URL validation | Only accepts `github.com/<owner>/<repo>` URLs — no deep paths, no other hosts |
 | Rate limiting | 5 analyses/day globally, 3/day per IP (in-memory, resets at midnight UTC) |
-| Timeout | 30 s hard timeout per analysis — large repos get a graceful error |
+| Timeout | 60 s code-level cap on the analysis; Edge streams tokens so progress is visible |
 | Cost protection | Max 12 key files sent to LLM, binary/lock files excluded, max 4096 tokens |
+
+### Deployment constraint: Vercel free-tier Edge
+
+The production demo runs on Vercel's free (Hobby) plan, where Edge Functions are hard-killed at ~30 s. Haiku occasionally needs longer than that for large repos, which will appear to the user as a truncated stream. To serve larger repos end-to-end, pick one:
+
+- **Upgrade to Vercel Pro** — raises Edge duration to 300 s.
+- **Self-host the API route** — move `apps/web/app/api/analyze` to a long-running runtime (Cloudflare Workers w/ paid plan, Fly.io, Railway, a small VPS) and proxy from Vercel. The code is Edge-compatible so the port is mostly mechanical.
 
 ---
 

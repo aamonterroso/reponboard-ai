@@ -1,8 +1,8 @@
 import { GitHubClient, parseGitHubUrl } from './github'
 import { runDiscovery } from './discovery'
-import { analyzeWithLLM } from './llm-analysis'
+import { analyzeWithLLM, analyzeWithLLMStream } from './llm-analysis'
 import type { LLMMode } from './llm-analysis'
-import type { AnalysisProgressEvent, FullAnalysisResult, KeyFile } from './types'
+import type { AnalysisProgressEvent, FullAnalysisResult, KeyFile, LLMAnalysisResult } from './types'
 
 // ─── Key File Selection ───────────────────────────────────────────────────────
 
@@ -123,14 +123,29 @@ export async function* runFullAnalysisStream(
       progress: { current: fileContents.size, total },
     }
 
-    // Layer 2: LLM analysis
+    // Layer 2: LLM analysis — stream tokens so the client sees progress instead
+    // of a blank screen while Anthropic generates the full JSON response
     yield { phase: 'analyzing', message: 'AI is analyzing the codebase...' }
 
-    let llmAnalysis: FullAnalysisResult['llmAnalysis'] = null
+    let llmAnalysis: LLMAnalysisResult | null = null
     let error: string | null = null
 
     try {
-      llmAnalysis = await analyzeWithLLM(discovery, fileContents, anthropicApiKey, llmMode)
+      for await (const event of analyzeWithLLMStream(
+        discovery,
+        fileContents,
+        anthropicApiKey,
+        llmMode,
+      )) {
+        if (event.type === 'progress') {
+          yield {
+            phase: 'analyzing',
+            message: `Generating analysis… ${event.chars.toLocaleString()} chars`,
+          }
+        } else {
+          llmAnalysis = event.result
+        }
+      }
     } catch (err) {
       console.error('[analyzeWithLLM] Error:', err)
       error = err instanceof Error ? err.message : String(err)

@@ -5,8 +5,11 @@ import { NextResponse } from 'next/server'
 import { checkAndIncrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
-// Edge Runtime on Vercel free tier has a 30s hard limit; leave 1s buffer
-const TIMEOUT_MS = 29_000
+// 60s is the code-level cap so local dev / Vercel Pro can run to completion.
+// NOTE: Vercel Edge on the free (Hobby) plan will still hard-kill the function
+// at ~30s regardless of this value. The streaming response shows progress up to
+// that point so the client at least sees activity before any forced cutoff.
+const TIMEOUT_MS = 60_000
 
 function getClientIp(request: Request): string {
   return (
