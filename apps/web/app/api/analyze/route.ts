@@ -1,10 +1,12 @@
+export const runtime = 'edge'
+
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
-import { randomUUID } from 'crypto'
 import { NextResponse } from 'next/server'
 import { checkAndIncrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
-const TIMEOUT_MS = 30_000
+// Edge Runtime on Vercel free tier has a 30s hard limit; leave 1s buffer
+const TIMEOUT_MS = 29_000
 
 function getClientIp(request: Request): string {
   return (
@@ -81,10 +83,8 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
 
   const githubToken = process.env.GITHUB_TOKEN ?? undefined
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
-  console.log('[analyze] ANTHROPIC_API_KEY present:', !!anthropicApiKey)
 
   if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
-    console.log('[analyze] Calling runFullAnalysisStream...')
     const llmMode = (process.env.LLM_MODE ?? 'production') as 'development' | 'production'
     const generator = runFullAnalysisStream(repoUrl, githubToken, anthropicApiKey, llmMode)
     const encoder = new TextEncoder()
@@ -109,7 +109,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         const timeout = setTimeout(
           () =>
             closeStream(
-              'Analysis timed out after 30 seconds. The repository may be too large — please try a smaller repo.',
+              'Analysis timed out. The repository may be too large — please try a smaller repo.',
             ),
           TIMEOUT_MS,
         )
@@ -143,7 +143,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       const createdAt = new Date().toISOString()
       const discovery = await runDiscovery(repoUrl, githubToken)
       return NextResponse.json({
-        id: randomUUID(),
+        id: crypto.randomUUID(),
         repoUrl,
         status: 'complete',
         discovery,
@@ -166,7 +166,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       return NextResponse.json(
         {
           error:
-            'Analysis timed out after 30 seconds. The repository may be too large — please try a smaller repo.',
+            'Analysis timed out. The repository may be too large — please try a smaller repo.',
         },
         { status: 504 },
       )

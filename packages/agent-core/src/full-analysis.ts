@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto'
 import { GitHubClient, parseGitHubUrl } from './github'
 import { runDiscovery } from './discovery'
 import { analyzeWithLLM } from './llm-analysis'
@@ -32,7 +31,7 @@ export async function runFullAnalysis(
   anthropicApiKey: string,
   llmMode: LLMMode = 'production',
 ): Promise<FullAnalysisResult> {
-  const id = randomUUID()
+  const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
 
   // Layer 1: heuristic discovery
@@ -86,7 +85,7 @@ export async function* runFullAnalysisStream(
   anthropicApiKey: string,
   llmMode: LLMMode = 'production',
 ): AsyncGenerator<AnalysisProgressEvent> {
-  const id = randomUUID()
+  const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
 
   try {

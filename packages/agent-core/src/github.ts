@@ -260,9 +260,14 @@ export class GitHubClient {
     )
 
     // GitHub returns base64 with embedded newlines — strip before decoding
+    // Uses Web Crypto APIs (atob + TextDecoder) instead of Buffer for Edge compatibility
     const content =
       raw.encoding === 'base64'
-        ? Buffer.from(raw.content.replace(/\n/g, ''), 'base64').toString('utf-8')
+        ? (() => {
+            const bin = atob(raw.content.replace(/\n/g, ''))
+            const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+            return new TextDecoder().decode(bytes)
+          })()
         : raw.content
 
     return {
