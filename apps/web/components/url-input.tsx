@@ -1,14 +1,16 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { FullAnalysisResult, AnalysisPhase } from '@reponboard/agent-core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { AnalysisResult } from './analysis-result'
 import { AnalysisProgress } from './analysis-progress'
 
+const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
+
 function isValidGitHubUrl(url: string): boolean {
-  return /^https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/.test(url.trim())
+  return GITHUB_URL_REGEX.test(url.trim())
 }
 
 export function UrlInput(): React.JSX.Element {
@@ -19,6 +21,16 @@ export function UrlInput(): React.JSX.Element {
   const [currentPhase, setCurrentPhase] = useState<AnalysisPhase | null>(null)
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
   const [streamMessage, setStreamMessage] = useState('')
+  const [remaining, setRemaining] = useState<number | null>(null)
+
+  useEffect(() => {
+    void fetch('/api/remaining')
+      .then((r) => r.json())
+      .then((data: { remaining: number }) => {
+        setRemaining(data.remaining)
+      })
+      .catch(() => undefined)
+  }, [])
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>): void {
     setUrl(e.target.value)
@@ -34,7 +46,7 @@ export function UrlInput(): React.JSX.Element {
     }
 
     if (!isValidGitHubUrl(trimmed)) {
-      setError('Must be a valid GitHub URL — e.g. https://github.com/owner/repo')
+      setError('Must be a valid GitHub repository URL — e.g. https://github.com/owner/repo')
       return
     }
 
@@ -52,7 +64,17 @@ export function UrlInput(): React.JSX.Element {
         const data: unknown = await response.json()
         const errorData = data as { error?: string }
         setError(errorData.error ?? 'An unexpected error occurred.')
+        // Refresh remaining count on rate limit error
+        if (response.status === 429) {
+          setRemaining(0)
+        }
         return
+      }
+
+      // Update remaining from response header
+      const remainingHeader = response.headers.get('X-RateLimit-Remaining')
+      if (remainingHeader !== null) {
+        setRemaining(parseInt(remainingHeader, 10))
       }
 
       const contentType = response.headers.get('Content-Type') ?? ''
@@ -73,8 +95,13 @@ export function UrlInput(): React.JSX.Element {
           for (const line of lines) {
             if (line.trim() === '') continue
             try {
-              const event = JSON.parse(line) as { phase: string; result?: FullAnalysisResult; error?: string; message?: string; progress?: unknown }
-              console.log('[stream event]', event)
+              const event = JSON.parse(line) as {
+                phase: string
+                result?: FullAnalysisResult
+                error?: string
+                message?: string
+                progress?: unknown
+              }
               if (event.phase === 'discovery') {
                 setCurrentPhase('discovery')
                 setStreamMessage(event.message ?? '')
@@ -123,6 +150,13 @@ export function UrlInput(): React.JSX.Element {
     setCurrentPhase(null)
     setProgress(null)
     setStreamMessage('')
+    // Refresh remaining count after reset
+    void fetch('/api/remaining')
+      .then((r) => r.json())
+      .then((data: { remaining: number }) => {
+        setRemaining(data.remaining)
+      })
+      .catch(() => undefined)
   }
 
   if (result !== null) {
@@ -163,6 +197,14 @@ export function UrlInput(): React.JSX.Element {
           )}
         </Button>
       </div>
+
+      {remaining !== null && remaining <= 3 && !loading && (
+        <p className="text-xs text-zinc-500 text-left">
+          {remaining === 0
+            ? 'No analyses remaining today. Check back tomorrow.'
+            : `${remaining} ${remaining === 1 ? 'analysis' : 'analyses'} remaining today`}
+        </p>
+      )}
 
       {loading && currentPhase !== null && (
         <AnalysisProgress

@@ -4,7 +4,7 @@
 
 The codebase tour you never got.
 
-[![Demo](https://img.shields.io/badge/Live_Demo-Visit-blue?style=for-the-badge)](https://reponboard.vercel.app)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-reponboard--ai.vercel.app-blue?style=for-the-badge)](https://reponboard-ai.vercel.app)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 ---
@@ -21,29 +21,13 @@ Paste a GitHub URL → Get an instant architecture breakdown:
 - **Key Patterns** — Conventions and patterns the codebase follows
 - **Exploration Path** — Suggested order to understand the system
 
-Then ask follow-up questions: *"How does auth work?"* *"Where are API routes defined?"*
-
 ---
 
-## 🚀 Quick Start
+## 🚀 Live Demo
 
-```bash
-# Clone the repo
-git clone https://github.com/aamonterroso/reponboard-ai.git
-cd reponboard-ai
+**[https://reponboard-ai.vercel.app](https://reponboard-ai.vercel.app)**
 
-# Install dependencies
-pnpm install
-
-# Set up environment
-cp .env.example .env.local
-# Add your ANTHROPIC_API_KEY
-
-# Run locally
-pnpm dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) and paste any public GitHub URL.
+> The demo is rate-limited to **5 analyses/day globally** and **3/day per IP** to keep hosting free. If you hit the limit, check back tomorrow or run it locally with your own API key.
 
 ---
 
@@ -66,11 +50,6 @@ GitHub URL
 ┌─────────────────────┐
 │  3. GUIDE OUTPUT    │  Summary, diagram, "start here" recommendations
 └─────────────────────┘
-    │
-    ▼
-┌─────────────────────┐
-│  4. INTERACTIVE Q&A │  Ask anything about the codebase
-└─────────────────────┘
 ```
 
 ### Tech Stack
@@ -85,6 +64,37 @@ GitHub URL
 
 ---
 
+## 💻 Run Locally
+
+```bash
+# Clone the repo
+git clone https://github.com/aamonterroso/reponboard-ai.git
+cd reponboard-ai
+
+# Install dependencies (requires pnpm)
+pnpm install
+
+# Set up environment variables
+cp .env.example .env.local
+# Edit .env.local and add your ANTHROPIC_API_KEY
+
+# Start the dev server
+pnpm dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) and paste any public GitHub URL.
+
+### Environment Variables
+
+```bash
+# .env.local
+ANTHROPIC_API_KEY=sk-ant-...   # Required — get one at console.anthropic.com
+GITHUB_TOKEN=ghp_...           # Optional — increases GitHub rate limit 60 → 5000/hr
+LLM_MODE=development           # development (Haiku, fast) | production (Sonnet, accurate)
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -92,6 +102,9 @@ reponboard-ai/
 ├── apps/
 │   └── web/                 # Next.js application
 │       ├── app/             # App Router pages + API routes
+│       │   └── api/
+│       │       ├── analyze/     # POST — runs analysis, NDJSON streaming
+│       │       └── remaining/   # GET  — returns daily analyses remaining
 │       └── components/      # React components
 ├── packages/
 │   └── agent-core/          # Agent logic (reusable)
@@ -104,31 +117,25 @@ reponboard-ai/
 
 ---
 
-## ⚙️ Environment Variables
+## ⚙️ Guardrails
 
-```bash
-# .env.local
-ANTHROPIC_API_KEY=sk-ant-...   # Required for AI analysis
-GITHUB_TOKEN=ghp_...           # Optional: increases rate limit 60 → 5000/hr
-LLM_MODE=development           # development (Haiku) | production (Sonnet)
-```
+| Guardrail | Details |
+|-----------|---------|
+| URL validation | Only accepts `github.com/<owner>/<repo>` URLs — no deep paths, no other hosts |
+| Rate limiting | 5 analyses/day globally, 3/day per IP (in-memory, resets at midnight UTC) |
+| Timeout | 30 s hard timeout per analysis — large repos get a graceful error |
+| Cost protection | Max 12 key files sent to LLM, binary/lock files excluded, max 4096 tokens |
 
 ---
 
-## 🛠️ Development
+## 🛠️ Development Commands
 
 ```bash
-pnpm dev          # Start dev server
+pnpm dev          # Start dev server (http://localhost:3000)
 pnpm build        # Production build
 pnpm typecheck    # Type checking
 pnpm lint         # Linting
 ```
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](docs/CONTRIBUTING.md) first.
 
 ---
 
@@ -138,10 +145,4 @@ MIT © [Allan Monterroso](https://github.com/aamonterroso)
 
 ---
 
-## 🙏 Acknowledgments
-
 Powered by [Claude](https://anthropic.com). Built because every dev deserves a proper codebase tour.
-
----
-
-**⭐ If this helped you, consider starring the repo!**

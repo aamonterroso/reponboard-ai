@@ -40,3 +40,4 @@ pnpm-debug.log*
 
 # OMC runtime state
 .omc/
+.vercel
