@@ -91,7 +91,7 @@ Strategy:
 2. Explore key directories if unclear
 3. Once you understand the project, call finish_analysis
 
-You have a budget of ~10 tool calls. Be efficient. Don't fetch files you won't use.
+You have a budget of ~5 tool calls. The most important files are pre-loaded for you in the user message — do not refetch them. Use your tool calls only for files/directories you genuinely need but haven't seen yet.
 
 Quality guidelines for finish_analysis:
 - Be specific and concrete. Reference actual file names, function names, and patterns you observed via tools.
@@ -369,7 +369,7 @@ export type LLMStreamEvent =
     }
   | { type: 'result'; result: LLMAnalysisResult }
 
-const MAX_TOOL_CALLS = 10
+const MAX_TOOL_CALLS = 5
 
 // ─── Result Validation & Normalization ────────────────────────────────────────
 
@@ -467,6 +467,60 @@ function normalizeLLMAnalysisResult(
   return result
 }
 
+// ─── Pre-fetch helpers ────────────────────────────────────────────────────────
+
+const KEY_FILE_IMPORTANCE_RANK: Record<
+  DiscoveryResult['keyFiles'][number]['importance'],
+  number
+> = { critical: 0, high: 1, medium: 2, low: 3 }
+
+const PREFETCH_FILE_LIMIT = 3
+const PREFETCH_CONTENT_CHARS = 3000
+
+// Fetch the top N most important keyFiles in parallel so the agent has
+// immediate context without burning tool calls on obvious files.
+async function prefetchTopKeyFiles(
+  discovery: DiscoveryResult,
+  githubClient: GitHubClient,
+  repoContext: { owner: string; repo: string; branch: string },
+): Promise<Map<string, string>> {
+  const top = [...discovery.keyFiles]
+    .sort(
+      (a, b) =>
+        KEY_FILE_IMPORTANCE_RANK[a.importance] -
+        KEY_FILE_IMPORTANCE_RANK[b.importance],
+    )
+    .slice(0, PREFETCH_FILE_LIMIT)
+    .map((f) => f.path)
+
+  if (top.length === 0) return new Map()
+
+  const raw = await githubClient.getFilesContent(
+    repoContext.owner,
+    repoContext.repo,
+    top,
+    repoContext.branch,
+  )
+
+  const contents = new Map<string, string>()
+  for (const [path, value] of raw) {
+    if (!(value instanceof Error)) contents.set(path, value.content)
+  }
+  return contents
+}
+
+function formatPrefetchedContent(contents: Map<string, string>): string {
+  if (contents.size === 0) return ''
+  const sections = Array.from(contents.entries()).map(([path, body]) => {
+    const trimmed =
+      body.length > PREFETCH_CONTENT_CHARS
+        ? body.slice(0, PREFETCH_CONTENT_CHARS) + '\n... (truncated)'
+        : body
+    return `### ${path}\n\`\`\`\n${trimmed}\n\`\`\``
+  })
+  return `\n\nHere are the most important files to start your analysis:\n\n${sections.join('\n\n')}\n\nNow explore further as needed with your tools.`
+}
+
 // ─── Main Tool Loop ───────────────────────────────────────────────────────────
 
 export async function* analyzeWithLLMStream(
@@ -478,7 +532,16 @@ export async function* analyzeWithLLMStream(
 ): AsyncGenerator<LLMStreamEvent> {
   const client = new Anthropic({ apiKey })
   const model = MODELS[mode]
-  const initialUser = buildInitialUserPrompt(discovery)
+
+  // Pre-fetch top key files in parallel so the agent has immediate context
+  // and doesn't burn its tool budget on obvious fetches.
+  const prefetched = await prefetchTopKeyFiles(
+    discovery,
+    githubClient,
+    repoContext,
+  )
+  const initialUser =
+    buildInitialUserPrompt(discovery) + formatPrefetchedContent(prefetched)
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: initialUser },

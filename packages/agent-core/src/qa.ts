@@ -49,7 +49,7 @@ const MODELS = {
   production: 'claude-sonnet-4-20250514',
 } as const
 
-const MAX_TOOL_CALLS = 5
+const MAX_TOOL_CALLS = 3
 const MAX_ITERATIONS = MAX_TOOL_CALLS + 3
 
 // ─── Tool Schema ──────────────────────────────────────────────────────────────

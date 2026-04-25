@@ -28,7 +28,11 @@ export interface RateLimitResult {
   ipRemaining: number
 }
 
-export function checkAndIncrementRateLimit(ip: string): RateLimitResult {
+// Check whether this IP is allowed to start a new analysis WITHOUT
+// incrementing. Call incrementRateLimit() only after the analysis
+// successfully reaches the 'complete' phase — failed/timed-out
+// analyses must not consume the user's daily quota.
+export function checkRateLimit(ip: string): RateLimitResult {
   resetIfStale(globalCounter)
 
   let ipCounter = ipCounters.get(ip)
@@ -42,8 +46,22 @@ export function checkAndIncrementRateLimit(ip: string): RateLimitResult {
   const globalRemaining = Math.max(0, GLOBAL_DAILY_LIMIT - globalCounter.count)
   const ipRemaining = Math.max(0, IP_DAILY_LIMIT - ipCounter.count)
 
-  if (globalCounter.count >= GLOBAL_DAILY_LIMIT || ipCounter.count >= IP_DAILY_LIMIT) {
-    return { allowed: false, globalRemaining, ipRemaining }
+  const allowed =
+    globalCounter.count < GLOBAL_DAILY_LIMIT &&
+    ipCounter.count < IP_DAILY_LIMIT
+
+  return { allowed, globalRemaining, ipRemaining }
+}
+
+export function incrementRateLimit(ip: string): RateLimitResult {
+  resetIfStale(globalCounter)
+
+  let ipCounter = ipCounters.get(ip)
+  if (ipCounter === undefined) {
+    ipCounter = { count: 0, resetAt: nextMidnightUTC() }
+    ipCounters.set(ip, ipCounter)
+  } else {
+    resetIfStale(ipCounter)
   }
 
   globalCounter.count++
@@ -54,6 +72,14 @@ export function checkAndIncrementRateLimit(ip: string): RateLimitResult {
     globalRemaining: Math.max(0, GLOBAL_DAILY_LIMIT - globalCounter.count),
     ipRemaining: Math.max(0, IP_DAILY_LIMIT - ipCounter.count),
   }
+}
+
+// Backwards-compatible alias for any consumer that still expects the old name.
+// New code should call checkRateLimit() then incrementRateLimit() separately.
+export function checkAndIncrementRateLimit(ip: string): RateLimitResult {
+  const check = checkRateLimit(ip)
+  if (!check.allowed) return check
+  return incrementRateLimit(ip)
 }
 
 export function getRemainingCount(ip: string): { globalRemaining: number; ipRemaining: number } {

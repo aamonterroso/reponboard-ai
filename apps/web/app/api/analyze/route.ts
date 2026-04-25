@@ -2,7 +2,7 @@ export const runtime = 'edge'
 
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
-import { checkAndIncrementRateLimit } from '@/lib/rate-limit'
+import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
 // 60s is the code-level cap so local dev / Vercel Pro can run to completion.
@@ -61,9 +61,10 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  // Rate limit check (only after URL is validated as a real GitHub repo URL)
+  // Rate limit CHECK only — increment happens after a successful 'complete'
+  // event so failed/timed-out analyses don't consume the user's daily quota.
   const ip = getClientIp(request)
-  const rateLimit = checkAndIncrementRateLimit(ip)
+  const rateLimit = checkRateLimit(ip)
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: 'Demo limit reached for today. Check back tomorrow.' },
@@ -120,6 +121,11 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         try {
           for await (const event of generator) {
             if (closed) break
+            // Charge the user's daily quota only when the analysis actually
+            // produces a result. Errors and the timeout path skip this.
+            if (event.phase === 'complete') {
+              incrementRateLimit(ip)
+            }
             controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
           }
         } catch (err) {

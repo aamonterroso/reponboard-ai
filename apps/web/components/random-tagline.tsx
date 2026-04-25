@@ -1,8 +1,8 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useEffect, useState } from 'react'
 
-const TAGLINES = [
+const taglines = [
   'Built for devs who hate reading READMEs',
   'Because nobody reads the onboarding doc',
   'Your senior dev, minus the condescension',
@@ -14,16 +14,13 @@ const TAGLINES = [
 ] as const
 
 export function RandomTagline(): React.JSX.Element {
-  // Pick once per mount. SSR renders index 0; client may pick differently —
-  // suppressHydrationWarning silences the mismatch on this single element.
-  const tagline = useMemo(
-    () => TAGLINES[Math.floor(Math.random() * TAGLINES.length)] ?? TAGLINES[0],
-    [],
-  )
+  // Render the first tagline during SSR + initial hydration to avoid
+  // hydration mismatch, then pick a random one client-side after mount.
+  const [tagline, setTagline] = useState<string>(taglines[0])
 
-  return (
-    <span suppressHydrationWarning className="text-zinc-500 italic">
-      {tagline}
-    </span>
-  )
+  useEffect(() => {
+    setTagline(taglines[Math.floor(Math.random() * taglines.length)] ?? taglines[0])
+  }, [])
+
+  return <span className="text-zinc-500 italic">{tagline}</span>
 }

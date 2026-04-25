@@ -7,7 +7,7 @@ import {
   parseGitHubUrl,
   type QAMessage,
 } from '@reponboard/agent-core'
-import { checkAndIncrementRateLimit } from '@/lib/rate-limit'
+import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
 const TIMEOUT_MS = 60_000
@@ -115,9 +115,11 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  // Rate limit (shared daily quota with /api/analyze)
+  // Rate limit CHECK only — increment happens after the Q&A successfully
+  // emits a 'complete' event so failed/timed-out questions don't consume
+  // the user's daily quota. Shared daily counter with /api/analyze.
   const ip = getClientIp(request)
-  const rateLimit = checkAndIncrementRateLimit(ip)
+  const rateLimit = checkRateLimit(ip)
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: 'Demo limit reached for today. Check back tomorrow.' },
@@ -212,6 +214,11 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       try {
         for await (const event of generator) {
           if (closed) break
+          // Charge the daily quota only when the Q&A actually produces a
+          // result. Errors and the timeout path skip this.
+          if (event.phase === 'complete') {
+            incrementRateLimit(ip)
+          }
           controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
         }
       } catch (err) {
