@@ -249,6 +249,22 @@ export interface QAContext {
   history: QAMessage[]
 }
 
+export interface QAResult {
+  answer: string
+  filesReferenced: string[]
+}
+
+export type QAProgressEvent =
+  | {
+      phase: 'thinking'
+      message: string
+      toolCall?: string
+      toolInput?: Record<string, unknown>
+    }
+  | { phase: 'tool_result'; tool: string; summary: string }
+  | { phase: 'complete'; result: QAResult }
+  | { phase: 'error'; error: string }
+
 // ─── LLM Analysis Types ──────────────────────────────────────────────────────
 
 export interface RefinedStack extends DetectedStack {
@@ -334,11 +350,23 @@ export interface FullAnalysisResult {
 
 // ─── Streaming Event Types ────────────────────────────────────────────────────
 
-export type AnalysisPhase = 'discovery' | 'fetching' | 'analyzing' | 'complete' | 'error'
+export type AnalysisPhase =
+  | 'discovery'
+  | 'fetching'
+  | 'analyzing'
+  | 'thinking'
+  | 'complete'
+  | 'error'
 
 export type AnalysisProgressEvent =
   | { phase: 'discovery'; message: string }
   | { phase: 'fetching'; message: string; progress: { current: number; total: number } }
   | { phase: 'analyzing'; message: string }
+  | {
+      phase: 'thinking'
+      message: string
+      toolCall?: string
+      toolInput?: Record<string, unknown>
+    }
   | { phase: 'complete'; result: FullAnalysisResult }
   | { phase: 'error'; error: string }

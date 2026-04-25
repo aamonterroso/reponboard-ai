@@ -1,14 +1,20 @@
 import { UrlInput } from '@/components/url-input'
+import { RandomTagline } from '@/components/random-tagline'
 
 export default function HomePage(): React.JSX.Element {
+  // NEXT_PUBLIC_IS_DEMO controls the rate-limit banner. Set to 'true' on the
+  // production Vercel deployment; 'false' (or unset) hides it locally.
+  const isDemo = process.env.NEXT_PUBLIC_IS_DEMO === 'true'
+
   return (
     <div className="min-h-screen bg-zinc-950 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(16,185,129,0.06),transparent)] text-zinc-100 flex flex-col">
-      {/* Demo banner */}
-      <div className="w-full bg-zinc-900/80 border-b border-zinc-800 text-center py-2 px-4">
-        <p className="text-sm text-zinc-400">
-          ⚡ Demo — limited to 5 analyses/day to keep it free
-        </p>
-      </div>
+      {isDemo && (
+        <div className="w-full bg-zinc-900/80 border-b border-zinc-800 text-center py-2 px-4">
+          <p className="text-sm text-zinc-400">
+            ⚡ Demo — limited to 5 analyses/day to keep it free
+          </p>
+        </div>
+      )}
 
       <main className="flex-1 flex flex-col items-center justify-center px-4 pt-8">
         <div className="w-full max-w-3xl flex flex-col items-center gap-6 text-center">
@@ -26,16 +32,19 @@ export default function HomePage(): React.JSX.Element {
         </div>
       </main>
 
-      <footer className="py-4 text-center text-sm text-zinc-600">
-        Built by{' '}
-        <a
-          href="https://github.com/aamonterroso"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-zinc-500 hover:text-zinc-300 transition-colors underline-offset-2 hover:underline"
-        >
-          Allan Monterroso
-        </a>
+      <footer className="py-4 text-center text-sm text-zinc-600 flex flex-col items-center gap-1">
+        <RandomTagline />
+        <span>
+          Built by{' '}
+          <a
+            href="https://github.com/aamonterroso"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-zinc-500 hover:text-zinc-300 transition-colors underline-offset-2 hover:underline"
+          >
+            Allan Monterroso
+          </a>
+        </span>
       </footer>
     </div>
   )

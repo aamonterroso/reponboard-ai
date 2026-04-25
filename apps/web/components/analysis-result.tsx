@@ -11,6 +11,7 @@ import type {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ChevronDown } from 'lucide-react'
+import { QaChat } from './qa-chat'
 
 interface AnalysisResultProps {
   result: FullAnalysisResult
@@ -250,7 +251,7 @@ function ArchitectureSection({
 }: {
   insights: LLMAnalysisResult['architectureInsights']
 }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const icon = patternIcon[insights.pattern] ?? '❓'
 
   return (
@@ -282,52 +283,58 @@ function ArchitectureSection({
         </svg>
       </button>
 
-      {expanded && (
-        <div className="flex flex-col gap-0 border-t border-zinc-800">
-          {insights.keyDirectories.length > 0 && (
-            <div className="px-4 pt-4 pb-3 flex flex-col gap-2">
-              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
-                Key Directories
-              </span>
-              <div className="flex flex-col gap-1">
-                {insights.keyDirectories.map((dir) => (
-                  <div key={dir.path} className="flex items-baseline gap-2">
-                    <span className="font-mono text-sm bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 shrink-0 leading-relaxed">
-                      {dir.path}/
-                    </span>
-                    <span className="text-xs text-zinc-600 leading-relaxed">{dir.purpose}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {insights.designDecisions.length > 0 && (
-            <div className="px-4 pt-3 pb-4 flex flex-col gap-2 border-t border-zinc-800/60">
-              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
-                Design Decisions
-              </span>
-              <ul className="flex flex-col gap-2">
-                {insights.designDecisions.map((dd, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-zinc-600 shrink-0" aria-hidden="true" />
-                    <div>
-                      <span className="text-sm text-zinc-300">{dd.title}</span>
-                      <span className="text-xs text-zinc-500"> — {dd.description}</span>
+      <div
+        className={`grid transition-[grid-template-rows] duration-300 ease-out ${
+          expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="flex flex-col gap-0 border-t border-zinc-800">
+            {insights.keyDirectories.length > 0 && (
+              <div className="px-4 pt-4 pb-3 flex flex-col gap-2">
+                <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
+                  Key Directories
+                </span>
+                <div className="flex flex-col gap-1">
+                  {insights.keyDirectories.map((dir) => (
+                    <div key={dir.path} className="flex items-baseline gap-2">
+                      <span className="font-mono text-sm bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 shrink-0 leading-relaxed">
+                        {dir.path}/
+                      </span>
+                      <span className="text-xs text-zinc-600 leading-relaxed">{dir.purpose}</span>
                     </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {insights.designDecisions.length > 0 && (
+              <div className="px-4 pt-3 pb-4 flex flex-col gap-2 border-t border-zinc-800/60">
+                <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
+                  Design Decisions
+                </span>
+                <ul className="flex flex-col gap-2">
+                  {insights.designDecisions.map((dd, i) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-zinc-600 shrink-0" aria-hidden="true" />
+                      <div>
+                        <span className="text-sm text-zinc-300">{dd.title}</span>
+                        <span className="text-xs text-zinc-500"> — {dd.description}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </div>
-      )}
+      </div>
     </Card>
   )
 }
 
 function LLMKeyFilesSection({ keyFiles }: { keyFiles: LLMAnalysisResult['keyFiles'] }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
 
   return (
     <Card className="animate-fade-slide-up hover:border-zinc-700 transition-colors duration-150">
@@ -348,24 +355,30 @@ function LLMKeyFilesSection({ keyFiles }: { keyFiles: LLMAnalysisResult['keyFile
         </div>
       </button>
 
-      {expanded && (
-        <div className="flex flex-col divide-y divide-zinc-800 border-t border-zinc-800 animate-fade-slide-up">
-          {keyFiles.length === 0 ? (
-            <p className="px-5 py-4 text-sm text-zinc-500">No key files identified.</p>
-          ) : (
-            keyFiles.map((file) => (
-              <div key={file.path} className="px-5 py-3 flex flex-col gap-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-mono text-zinc-100">{file.path}</span>
-                  <Badge label={file.category} variant="amber" />
+      <div
+        className={`grid transition-[grid-template-rows] duration-300 ease-out ${
+          expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="flex flex-col divide-y divide-zinc-800 border-t border-zinc-800">
+            {keyFiles.length === 0 ? (
+              <p className="px-5 py-4 text-sm text-zinc-500">No key files identified.</p>
+            ) : (
+              keyFiles.map((file) => (
+                <div key={file.path} className="px-5 py-3 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-mono text-zinc-100">{file.path}</span>
+                    <Badge label={file.category} variant="amber" />
+                  </div>
+                  <p className="text-xs text-zinc-400 leading-relaxed">{file.whatItDoes}</p>
+                  <p className="text-xs text-emerald-600/80 leading-relaxed">{file.whyImportant}</p>
                 </div>
-                <p className="text-xs text-zinc-400 leading-relaxed">{file.whatItDoes}</p>
-                <p className="text-xs text-emerald-600/80 leading-relaxed">{file.whyImportant}</p>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
-      )}
+      </div>
     </Card>
   )
 }
@@ -393,40 +406,46 @@ function ExplorationPathSection({ steps }: { steps: LLMAnalysisResult['explorati
         </div>
       </button>
 
-      {expanded && (
-        <div className="px-5 pb-5 flex flex-col gap-3 border-t border-zinc-800 pt-4 animate-fade-slide-up">
-          {steps.map((step) => (
-            <div
-              key={step.order}
-              className="flex gap-4 p-4 bg-zinc-800/50 border border-zinc-800 rounded-xl"
-            >
-              <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-mono text-zinc-400 mt-0.5">
-                {step.order}
-              </div>
-              <div className="flex flex-col gap-1.5 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-zinc-100">{step.title}</span>
-                  <span className="text-xs text-zinc-500 shrink-0">~{step.estimatedMinutes}m</span>
+      <div
+        className={`grid transition-[grid-template-rows] duration-300 ease-out ${
+          expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="px-5 pb-5 flex flex-col gap-3 border-t border-zinc-800 pt-4">
+            {steps.map((step) => (
+              <div
+                key={step.order}
+                className="flex gap-4 p-4 bg-zinc-800/50 border border-zinc-800 rounded-xl"
+              >
+                <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-mono text-zinc-400 mt-0.5">
+                  {step.order}
                 </div>
-                <p className="text-xs text-zinc-400 leading-relaxed">{step.description}</p>
-                {step.files.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-0.5">
-                    {step.files.map((f) => (
-                      <span
-                        key={f}
-                        className="text-xs font-mono text-zinc-300 bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 rounded hover:bg-zinc-700 cursor-default transition-colors"
-                      >
-                        {f}
-                      </span>
-                    ))}
+                <div className="flex flex-col gap-1.5 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-zinc-100">{step.title}</span>
+                    <span className="text-xs text-zinc-500 shrink-0">~{step.estimatedMinutes}m</span>
                   </div>
-                )}
+                  <p className="text-xs text-zinc-400 leading-relaxed">{step.description}</p>
+                  {step.files.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-0.5">
+                      {step.files.map((f) => (
+                        <span
+                          key={f}
+                          className="text-xs font-mono text-zinc-300 bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 rounded hover:bg-zinc-700 cursor-default transition-colors"
+                        >
+                          {f}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-          <p className="text-xs text-zinc-600 text-right">Total: ~{totalMinutes} minutes</p>
+            ))}
+            <p className="text-xs text-zinc-600 text-right">Total: ~{totalMinutes} minutes</p>
+          </div>
         </div>
-      )}
+      </div>
     </Card>
   )
 }
@@ -622,7 +641,7 @@ export function AnalysisResult({ result, onReset }: AnalysisResultProps): React.
             </div>
             <div className="flex flex-col gap-1">
               <span className="text-2xl font-bold text-zinc-100">
-                {Math.round((llmAnalysis?.refinedStack.confidence ?? stack.confidence) * 100)}%
+                {Math.round((llmAnalysis?.refinedStack?.confidence ?? stack.confidence) * 100)}%
               </span>
               <span className="text-xs text-zinc-500">Stack confidence</span>
             </div>
@@ -633,6 +652,8 @@ export function AnalysisResult({ result, onReset }: AnalysisResultProps): React.
       <Button variant="secondary" onClick={onReset}>
         Analyze another repo
       </Button>
+
+      {llmAnalysis !== null && <QaChat result={result} />}
     </div>
   )
 }

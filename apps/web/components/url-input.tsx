@@ -112,6 +112,11 @@ export function UrlInput(): React.JSX.Element {
               } else if (event.phase === 'analyzing') {
                 setCurrentPhase('analyzing')
                 setStreamMessage(event.message ?? '')
+              } else if (event.phase === 'thinking') {
+                // Agent tool_use events — stay in 'analyzing' step for the
+                // progress UI but surface the tool activity in the message
+                setCurrentPhase('analyzing')
+                setStreamMessage(event.message ?? 'Agent is thinking...')
               } else if (event.phase === 'complete' && event.result !== undefined) {
                 setCurrentPhase('complete')
                 setResult(event.result)
