@@ -17,8 +17,8 @@ export default function HomePage(): React.JSX.Element {
       )}
 
       <main className="flex-1 flex flex-col items-center justify-center px-4 pt-8">
-        <div className="w-full max-w-3xl flex flex-col items-center gap-6 text-center">
-          <div className="flex flex-col items-center gap-3">
+        <div className="w-full max-w-3xl flex flex-col items-center gap-6">
+          <div className="flex flex-col items-center gap-3 text-center">
             <span className="text-5xl" aria-hidden="true">🧭</span>
             <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-b from-zinc-50 to-zinc-300 bg-clip-text text-transparent">
               reponboard-ai

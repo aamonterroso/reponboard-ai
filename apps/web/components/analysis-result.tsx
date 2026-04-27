@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import type {
+  ArchitecturePattern,
   FullAnalysisResult,
   LLMAnalysisResult,
   DiscoveryResult,
@@ -10,7 +11,7 @@ import type {
 } from '@reponboard/agent-core'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { ChevronDown } from 'lucide-react'
+import { Check, ChevronDown, ExternalLink } from 'lucide-react'
 import { QaChat } from './qa-chat'
 
 interface AnalysisResultProps {
@@ -233,7 +234,7 @@ function StackSection({
   )
 }
 
-const patternIcon: Record<string, string> = {
+const patternIcon: Record<ArchitecturePattern, string> = {
   monolith: '🧱',
   microservices: '🔀',
   monorepo: '📦',
@@ -243,7 +244,7 @@ const patternIcon: Record<string, string> = {
   serverless: '☁️',
   jamstack: '🌐',
   library: '📚',
-  unknown: '❓',
+  unknown: '🧩',
 }
 
 function ArchitectureSection({
@@ -252,7 +253,7 @@ function ArchitectureSection({
   insights: LLMAnalysisResult['architectureInsights']
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
-  const icon = patternIcon[insights.pattern] ?? '❓'
+  const icon = patternIcon[insights.pattern] ?? patternIcon.unknown
 
   return (
     <Card className="animate-fade-slide-up">
@@ -264,11 +265,15 @@ function ArchitectureSection({
       >
         <div className="flex items-center gap-3">
           <span className="text-xl" aria-hidden="true">{icon}</span>
-          <div className="flex flex-col items-start gap-0.5">
+          <div className="flex flex-col items-start gap-0.5 min-w-0">
             <span className="text-sm font-semibold text-violet-300 capitalize">
               {insights.pattern}
             </span>
-            <span className="text-xs text-zinc-500">architecture pattern</span>
+            <span className="text-xs text-zinc-500 text-left line-clamp-2">
+              {insights.patternDescription?.trim().length > 0
+                ? insights.patternDescription
+                : 'architecture pattern'}
+            </span>
           </div>
         </div>
         <svg
@@ -383,24 +388,64 @@ function LLMKeyFilesSection({ keyFiles }: { keyFiles: LLMAnalysisResult['keyFile
   )
 }
 
-function ExplorationPathSection({ steps }: { steps: LLMAnalysisResult['explorationPath'] }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
+function ExplorationPathSection({
+  steps,
+  repoFullName,
+  defaultBranch,
+}: {
+  steps: LLMAnalysisResult['explorationPath']
+  repoFullName: string
+  defaultBranch: string
+}): React.JSX.Element {
+  const [sectionExpanded, setSectionExpanded] = useState(true)
+  const [visited, setVisited] = useState<Set<number>>(new Set())
+  const [openStops, setOpenStops] = useState<Set<number>>(new Set())
+
   const totalMinutes = steps.reduce((sum, s) => sum + s.estimatedMinutes, 0)
+  const visitedCount = steps.filter((s) => visited.has(s.order)).length
+  const allVisited = steps.length > 0 && visitedCount === steps.length
+  const progressPct =
+    steps.length === 0 ? 0 : Math.round((visitedCount / steps.length) * 100)
+  const currentOrder = steps.find((s) => !visited.has(s.order))?.order ?? null
+
+  const toggleVisited = (order: number): void => {
+    setVisited((prev) => {
+      const next = new Set(prev)
+      if (next.has(order)) next.delete(order)
+      else next.add(order)
+      return next
+    })
+  }
+
+  const toggleStop = (order: number): void => {
+    setOpenStops((prev) => {
+      const next = new Set(prev)
+      if (next.has(order)) next.delete(order)
+      else next.add(order)
+      return next
+    })
+  }
 
   return (
     <Card className="animate-fade-slide-up hover:border-zinc-700 transition-colors duration-150">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setSectionExpanded((v) => !v)}
         className="w-full flex items-center justify-between px-5 py-4 hover:bg-zinc-800/50 transition-colors rounded-t-xl"
       >
-        <span className="text-xs font-semibold text-zinc-500 uppercase tracking-widest">Exploration Path</span>
+        <span className="text-xs font-semibold text-zinc-500 uppercase tracking-widest">
+          Your Onboarding Journey
+        </span>
         <div className="flex items-center gap-2">
-          {!expanded && (
-            <span className="text-xs text-zinc-600">{steps.length} steps · ~{totalMinutes}m</span>
+          {!sectionExpanded && (
+            <span className="text-xs text-zinc-600">
+              {visitedCount}/{steps.length} · ~{totalMinutes}m
+            </span>
           )}
           <ChevronDown
-            className={`h-4 w-4 text-zinc-500 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
+            className={`h-4 w-4 text-zinc-500 transition-transform duration-200 ${
+              sectionExpanded ? 'rotate-180' : ''
+            }`}
             aria-hidden="true"
           />
         </div>
@@ -408,41 +453,157 @@ function ExplorationPathSection({ steps }: { steps: LLMAnalysisResult['explorati
 
       <div
         className={`grid transition-[grid-template-rows] duration-300 ease-out ${
-          expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+          sectionExpanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
         }`}
       >
         <div className="overflow-hidden">
-          <div className="px-5 pb-5 flex flex-col gap-3 border-t border-zinc-800 pt-4">
-            {steps.map((step) => (
-              <div
-                key={step.order}
-                className="flex gap-4 p-4 bg-zinc-800/50 border border-zinc-800 rounded-xl"
-              >
-                <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-mono text-zinc-400 mt-0.5">
-                  {step.order}
-                </div>
-                <div className="flex flex-col gap-1.5 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-zinc-100">{step.title}</span>
-                    <span className="text-xs text-zinc-500 shrink-0">~{step.estimatedMinutes}m</span>
-                  </div>
-                  <p className="text-xs text-zinc-400 leading-relaxed">{step.description}</p>
-                  {step.files.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-0.5">
-                      {step.files.map((f) => (
-                        <span
-                          key={f}
-                          className="text-xs font-mono text-zinc-300 bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 rounded hover:bg-zinc-700 cursor-default transition-colors"
-                        >
-                          {f}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
+          <div className="border-t border-zinc-800 pt-4 pb-4 px-4 flex flex-col gap-4">
+            {/* Progress bar */}
+            <div className="flex flex-col gap-2 px-1">
+              <div className="flex items-center justify-between">
+                <span
+                  className={`text-xs ${
+                    allVisited ? 'text-emerald-400' : 'text-zinc-400'
+                  }`}
+                >
+                  {allVisited
+                    ? `Journey complete · ~${totalMinutes} min`
+                    : visitedCount === 0
+                      ? 'Start your journey'
+                      : `${visitedCount} of ${steps.length} stops explored`}
+                </span>
+                <span className="text-xs text-zinc-600 font-mono">
+                  {progressPct}%
+                </span>
               </div>
-            ))}
-            <p className="text-xs text-zinc-600 text-right">Total: ~{totalMinutes} minutes</p>
+              <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300 ease-out rounded-full"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+            </div>
+
+            {/* Vertical timeline */}
+            <div className="flex flex-col gap-0">
+              {steps.map((step) => {
+                const isVisited = visited.has(step.order)
+                const isCurrent = !isVisited && currentOrder === step.order
+                const isOpen = openStops.has(step.order)
+                const lineClass = isVisited
+                  ? 'border-emerald-700/50'
+                  : 'border-zinc-800'
+
+                return (
+                  <div key={step.order} className="flex items-stretch gap-3">
+                    {/* Left column: continuous line + overlapping marker */}
+                    <div
+                      className={`w-10 shrink-0 border-l-2 ${lineClass} relative`}
+                    >
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          toggleVisited(step.order)
+                        }}
+                        aria-label={
+                          isVisited ? 'Mark as unvisited' : 'Mark as visited'
+                        }
+                        className={`absolute top-3 left-0 -translate-x-1/2 w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-transform duration-200 hover:scale-110 ${
+                          isVisited
+                            ? 'bg-emerald-500 text-white'
+                            : isCurrent
+                              ? 'bg-emerald-500/20 border-2 border-emerald-500 ring-2 ring-emerald-500/30 text-emerald-400'
+                              : 'bg-zinc-950 border-2 border-zinc-700 text-zinc-500'
+                        }`}
+                      >
+                        {isVisited ? (
+                          <Check className="w-4 h-4" aria-hidden="true" />
+                        ) : (
+                          <span className="text-xs font-mono font-medium">
+                            {step.order}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Right column: clickable content row */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => toggleStop(step.order)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleStop(step.order)
+                        }
+                      }}
+                      className="flex-1 min-w-0 py-3 px-4 rounded-md cursor-pointer hover:bg-zinc-800/30 transition-colors duration-200"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <span
+                          className={`text-sm font-medium ${
+                            isVisited
+                              ? 'text-zinc-500 line-through'
+                              : 'text-zinc-100'
+                          }`}
+                        >
+                          {step.title}
+                        </span>
+                        <span className="shrink-0 text-xs text-zinc-400 bg-zinc-800/60 border border-zinc-700/60 rounded-full px-2 py-0.5">
+                          ~{step.estimatedMinutes}m read
+                        </span>
+                      </div>
+
+                      {!isOpen && (
+                        <p className="text-xs text-zinc-500 line-clamp-1 mt-1">
+                          {step.description}
+                        </p>
+                      )}
+
+                      {isOpen && (
+                        <div className="mt-2 flex flex-col gap-2">
+                          <p className="text-xs text-zinc-400 leading-relaxed">
+                            {step.description}
+                          </p>
+                          {step.files.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {step.files.map((f) => (
+                                <a
+                                  key={f}
+                                  href={`https://github.com/${repoFullName}/blob/${defaultBranch}/${f}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex items-center text-xs font-mono text-zinc-300 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 hover:bg-zinc-700 hover:text-emerald-300 hover:border-emerald-700/50 transition-colors"
+                                >
+                                  {f}
+                                  <ExternalLink
+                                    className="w-3 h-3 inline-block ml-1 opacity-50"
+                                    aria-hidden="true"
+                                  />
+                                </a>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Footer */}
+            <p
+              className={`text-xs text-right ${
+                allVisited ? 'text-emerald-500' : 'text-zinc-600'
+              }`}
+            >
+              {allVisited
+                ? '✓ All stops visited'
+                : `Total journey · ~${totalMinutes} minutes`}
+            </p>
           </div>
         </div>
       </div>
@@ -599,13 +760,17 @@ export function AnalysisResult({ result, onReset }: AnalysisResultProps): React.
             <StackSection refinedStack={llmAnalysis.refinedStack} isNonCode={isNonCode} />
           </div>
           <div style={{ animationDelay: '300ms' }}>
-            <ArchitectureSection insights={llmAnalysis.architectureInsights} />
+            <ExplorationPathSection
+              steps={llmAnalysis.explorationPath}
+              repoFullName={repoInfo.fullName}
+              defaultBranch={repoInfo.defaultBranch}
+            />
           </div>
           <div style={{ animationDelay: '400ms' }}>
-            <LLMKeyFilesSection keyFiles={llmAnalysis.keyFiles} />
+            <ArchitectureSection insights={llmAnalysis.architectureInsights} />
           </div>
           <div style={{ animationDelay: '500ms' }}>
-            <ExplorationPathSection steps={llmAnalysis.explorationPath} />
+            <LLMKeyFilesSection keyFiles={llmAnalysis.keyFiles} />
           </div>
 
         </>
