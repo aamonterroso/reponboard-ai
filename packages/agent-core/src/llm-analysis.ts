@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
-import type { DiscoveryResult, LLMAnalysisResult } from './types'
+import type { DetectedStack, DiscoveryResult, LLMAnalysisResult } from './types'
 
 // ─── Tree Filtering ───────────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ Quality guidelines for finish_analysis:
 - codebaseContext should be a dense 2-3 paragraph summary to serve as background for follow-up questions.
 - Size caps: keyFiles ≤ 10, explorationPath ≤ 5, keyDirectories ≤ 6, designDecisions ≤ 4, additionalLibraries ≤ 8.
 - All description fields: max 2 sentences each.
+- For architectureInsights.pattern: pick exactly ONE slug from the enum (monolith, microservices, monorepo, mvc, layered, event-driven, serverless, jamstack, library, unknown). Do NOT write a sentence here. Use architectureInsights.patternDescription for the rich 1-2 sentence description of the architecture style.
 - Prioritize quality over quantity.`
 
 // ─── Tool Schemas ─────────────────────────────────────────────────────────────
@@ -147,7 +148,28 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
     architectureInsights: {
       type: 'object',
       properties: {
-        pattern: { type: 'string' },
+        pattern: {
+          type: 'string',
+          enum: [
+            'monolith',
+            'microservices',
+            'monorepo',
+            'mvc',
+            'layered',
+            'event-driven',
+            'serverless',
+            'jamstack',
+            'library',
+            'unknown',
+          ],
+          description:
+            'Pick the SINGLE closest matching pattern slug from the enum. Do not invent new values. If unsure, use "unknown".',
+        },
+        patternDescription: {
+          type: 'string',
+          description:
+            'A 1-2 sentence rich description of the architecture (e.g. "Monorepo with two-layer analysis pipeline: heuristic discovery feeds an LLM refinement layer, exposed via a Next.js streaming API."). This is the descriptive text shown to the user as a subtitle.',
+        },
         keyDirectories: {
           type: 'array',
           items: {
@@ -171,7 +193,7 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
           },
         },
       },
-      required: ['pattern', 'keyDirectories', 'designDecisions'],
+      required: ['pattern', 'patternDescription', 'keyDirectories', 'designDecisions'],
     },
     keyFiles: {
       type: 'array',
@@ -385,63 +407,169 @@ function dedupeBy<T>(arr: T[], keyFn: (x: T) => string): T[] {
   return out
 }
 
-// Anthropic sometimes returns tool_use inputs that don't fully match the schema.
-// Validate the shape so the frontend never receives a partially-populated
-// LLMAnalysisResult (which caused runtime crashes like "Cannot read properties
-// of undefined (reading 'runtime')").
-function assertValidLLMAnalysisResult(
+const VALID_PATTERNS = [
+  'monolith',
+  'microservices',
+  'monorepo',
+  'mvc',
+  'layered',
+  'event-driven',
+  'serverless',
+  'jamstack',
+  'library',
+  'unknown',
+] as const
+
+type ArchPattern = (typeof VALID_PATTERNS)[number]
+
+// Anthropic sometimes returns tool_use inputs that don't fully match the schema
+// (e.g. omitting top-level fields when under MAX_TOOL_CALLS pressure). Instead
+// of throwing — which kills the whole analysis — coerce the result into a
+// fully-shaped LLMAnalysisResult by filling missing fields with sensible
+// fallbacks (heuristic discovery data where applicable, empty defaults
+// otherwise). Only throw if the LLM returned no object at all.
+function coerceLLMAnalysisResult(
   value: unknown,
-): asserts value is LLMAnalysisResult {
+  discoveryStack: DetectedStack,
+): LLMAnalysisResult {
   if (typeof value !== 'object' || value === null) {
     throw new Error('finish_analysis returned non-object')
   }
   const v = value as Record<string, unknown>
 
-  const requiredTop = [
-    'refinedStack',
-    'executiveSummary',
-    'architectureInsights',
-    'keyFiles',
-    'explorationPath',
-    'codebaseContext',
-  ] as const
-  for (const key of requiredTop) {
-    if (v[key] === undefined || v[key] === null) {
-      throw new Error(`finish_analysis missing required field: ${key}`)
+  // Step B — refinedStack
+  let refinedStack: LLMAnalysisResult['refinedStack']
+  if (typeof v.refinedStack !== 'object' || v.refinedStack === null) {
+    console.warn('[LLM] refinedStack missing, falling back to discovery stack')
+    refinedStack = {
+      ...discoveryStack,
+      reasoning:
+        'Stack derived from heuristic discovery (LLM did not refine).',
+    }
+  } else {
+    const rs = v.refinedStack as Record<string, unknown>
+    refinedStack = {
+      runtime: (rs.runtime as DetectedStack['runtime']) ?? discoveryStack.runtime,
+      framework:
+        (rs.framework as DetectedStack['framework']) ?? discoveryStack.framework,
+      language:
+        (rs.language as DetectedStack['language']) ?? discoveryStack.language,
+      category:
+        (rs.category as DetectedStack['category']) ?? discoveryStack.category,
+      packageManager:
+        (rs.packageManager as DetectedStack['packageManager']) ??
+        discoveryStack.packageManager,
+      hasTests:
+        typeof rs.hasTests === 'boolean' ? rs.hasTests : discoveryStack.hasTests,
+      hasDocker:
+        typeof rs.hasDocker === 'boolean'
+          ? rs.hasDocker
+          : discoveryStack.hasDocker,
+      hasCi: typeof rs.hasCi === 'boolean' ? rs.hasCi : discoveryStack.hasCi,
+      additionalLibraries: Array.isArray(rs.additionalLibraries)
+        ? (rs.additionalLibraries.filter(
+            (x) => typeof x === 'string',
+          ) as string[])
+        : discoveryStack.additionalLibraries,
+      confidence:
+        typeof rs.confidence === 'number'
+          ? rs.confidence
+          : discoveryStack.confidence,
+      reasoning: typeof rs.reasoning === 'string' ? rs.reasoning : '',
     }
   }
 
-  const rs = v.refinedStack as Record<string, unknown>
-  const rsRequired = [
-    'runtime',
-    'framework',
-    'language',
-    'category',
-    'packageManager',
-    'confidence',
-  ] as const
-  for (const key of rsRequired) {
-    if (rs[key] === undefined || rs[key] === null) {
-      throw new Error(`finish_analysis.refinedStack missing field: ${key}`)
+  // Step C — executiveSummary
+  let executiveSummary: LLMAnalysisResult['executiveSummary']
+  if (typeof v.executiveSummary !== 'object' || v.executiveSummary === null) {
+    console.warn('[LLM] executiveSummary missing, using minimal fallback')
+    executiveSummary = {
+      oneLiner: 'Analysis incomplete — LLM did not provide a summary.',
+      overview:
+        'The AI analysis layer did not return a complete summary for this repository. The structural discovery data below is still accurate.',
+      targetAudience: 'Developers exploring this codebase.',
+    }
+  } else {
+    const es = v.executiveSummary as Record<string, unknown>
+    executiveSummary = {
+      oneLiner: typeof es.oneLiner === 'string' ? es.oneLiner : '',
+      overview: typeof es.overview === 'string' ? es.overview : '',
+      targetAudience:
+        typeof es.targetAudience === 'string' ? es.targetAudience : '',
     }
   }
 
-  const es = v.executiveSummary as Record<string, unknown>
-  if (typeof es.oneLiner !== 'string' || typeof es.overview !== 'string') {
-    throw new Error('finish_analysis.executiveSummary is malformed')
-  }
-
-  const ai = v.architectureInsights as Record<string, unknown>
+  // Step D — architectureInsights
+  let architectureInsights: LLMAnalysisResult['architectureInsights']
   if (
-    typeof ai.pattern !== 'string' ||
-    !Array.isArray(ai.keyDirectories) ||
-    !Array.isArray(ai.designDecisions)
+    typeof v.architectureInsights !== 'object' ||
+    v.architectureInsights === null
   ) {
-    throw new Error('finish_analysis.architectureInsights is malformed')
+    console.warn('[LLM] architectureInsights missing, using empty defaults')
+    architectureInsights = {
+      pattern: 'unknown',
+      patternDescription: '',
+      keyDirectories: [],
+      designDecisions: [],
+    }
+  } else {
+    const ai = v.architectureInsights as Record<string, unknown>
+    let pattern: ArchPattern = 'unknown'
+    if (
+      typeof ai.pattern === 'string' &&
+      (VALID_PATTERNS as readonly string[]).includes(ai.pattern)
+    ) {
+      pattern = ai.pattern as ArchPattern
+    } else if (typeof ai.pattern === 'string') {
+      console.warn(
+        `[LLM] pattern "${ai.pattern}" not in enum, coerced to unknown`,
+      )
+    }
+    architectureInsights = {
+      pattern,
+      patternDescription:
+        typeof ai.patternDescription === 'string' &&
+        ai.patternDescription.trim() !== ''
+          ? ai.patternDescription
+          : '',
+      keyDirectories: Array.isArray(ai.keyDirectories)
+        ? (ai.keyDirectories as LLMAnalysisResult['architectureInsights']['keyDirectories'])
+        : [],
+      designDecisions: Array.isArray(ai.designDecisions)
+        ? (ai.designDecisions as LLMAnalysisResult['architectureInsights']['designDecisions'])
+        : [],
+    }
   }
 
-  if (!Array.isArray(v.keyFiles) || !Array.isArray(v.explorationPath)) {
-    throw new Error('finish_analysis.keyFiles/explorationPath must be arrays')
+  // Step E — keyFiles
+  let keyFiles: LLMAnalysisResult['keyFiles']
+  if (!Array.isArray(v.keyFiles)) {
+    console.warn('[LLM] keyFiles missing, defaulting to []')
+    keyFiles = []
+  } else {
+    keyFiles = v.keyFiles as LLMAnalysisResult['keyFiles']
+  }
+
+  // Step F — explorationPath
+  let explorationPath: LLMAnalysisResult['explorationPath']
+  if (!Array.isArray(v.explorationPath)) {
+    console.warn('[LLM] explorationPath missing, defaulting to []')
+    explorationPath = []
+  } else {
+    explorationPath = v.explorationPath as LLMAnalysisResult['explorationPath']
+  }
+
+  // Step G — codebaseContext
+  const codebaseContext =
+    typeof v.codebaseContext === 'string' ? v.codebaseContext : ''
+
+  return {
+    refinedStack,
+    executiveSummary,
+    architectureInsights,
+    keyFiles,
+    explorationPath,
+    codebaseContext,
   }
 }
 
@@ -451,6 +579,8 @@ function normalizeLLMAnalysisResult(
   result: LLMAnalysisResult,
 ): LLMAnalysisResult {
   const insights = result.architectureInsights
+  insights.patternDescription =
+    typeof insights.patternDescription === 'string' ? insights.patternDescription : ''
   insights.keyDirectories = dedupeBy(insights.keyDirectories, (d) => d.path)
 
   result.keyFiles = dedupeBy(result.keyFiles, (f) => f.path)
@@ -576,8 +706,8 @@ export async function* analyzeWithLLMStream(
       // Validate the tool input matches the expected schema before handing it
       // to the UI. Throws on malformed results so the caller can fall back to
       // discovery-only output instead of rendering a broken page.
-      assertValidLLMAnalysisResult(finishBlock.input)
-      const normalized = normalizeLLMAnalysisResult(finishBlock.input)
+      const coerced = coerceLLMAnalysisResult(finishBlock.input, discovery.stack)
+      const normalized = normalizeLLMAnalysisResult(coerced)
       yield { type: 'result', result: normalized }
       return
     }

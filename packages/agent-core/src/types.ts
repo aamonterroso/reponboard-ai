@@ -289,6 +289,7 @@ export interface DesignDecision {
 
 export interface ArchitectureInsights {
   pattern: ArchitecturePattern
+  patternDescription: string
   keyDirectories: KeyDirectory[]
   designDecisions: DesignDecision[]
 }
