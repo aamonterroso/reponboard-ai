@@ -328,6 +328,18 @@ export interface LLMAnalysisResult {
   codebaseContext: string
 }
 
+export interface LLMCorePartial {
+  refinedStack: RefinedStack
+  executiveSummary: ExecutiveSummary
+  architectureInsights: ArchitectureInsights
+}
+
+export interface LLMGuidePartial {
+  keyFiles: LLMKeyFile[]
+  explorationPath: ExplorationPathStep[]
+  codebaseContext: string
+}
+
 // ─── Full Analysis Result ─────────────────────────────────────────────────────
 
 export type AnalysisStatus =
@@ -356,6 +368,8 @@ export type AnalysisPhase =
   | 'fetching'
   | 'analyzing'
   | 'thinking'
+  | 'partial_core'
+  | 'partial_guide'
   | 'complete'
   | 'error'
 
@@ -369,5 +383,7 @@ export type AnalysisProgressEvent =
       toolCall?: string
       toolInput?: Record<string, unknown>
     }
+  | { phase: 'partial_core'; core: LLMCorePartial }
+  | { phase: 'partial_guide'; guide: LLMGuidePartial }
   | { phase: 'complete'; result: FullAnalysisResult }
   | { phase: 'error'; error: string }

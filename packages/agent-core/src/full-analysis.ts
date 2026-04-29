@@ -63,12 +63,15 @@ export async function* runFullAnalysisStream(
   anthropicApiKey: string,
   llmMode: LLMMode = 'production',
 ): AsyncGenerator<AnalysisProgressEvent> {
+  const t0 = Date.now()
+  console.log('[timing] analysis start')
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
 
   try {
     yield { phase: 'discovery', message: 'Scanning repository structure...' }
     const discovery = await runDiscovery(repoUrl, githubToken)
+    console.log(`[timing] discovery done in ${Date.now() - t0}ms`)
 
     const { owner, repo, branch } = parseGitHubUrl(repoUrl)
     const client = new GitHubClient(githubToken)
@@ -100,6 +103,10 @@ export async function* runFullAnalysisStream(
           if (event.toolCall !== undefined) base.toolCall = event.toolCall
           if (event.toolInput !== undefined) base.toolInput = event.toolInput
           yield base
+        } else if (event.type === 'partial_core') {
+          yield { phase: 'partial_core', core: event.core }
+        } else if (event.type === 'partial_guide') {
+          yield { phase: 'partial_guide', guide: event.guide }
         } else {
           llmAnalysis = event.result
         }
@@ -108,7 +115,9 @@ export async function* runFullAnalysisStream(
       console.error('[analyzeWithLLM] Error:', err)
       error = err instanceof Error ? err.message : String(err)
     }
+    console.log(`[timing] llm analysis done in ${Date.now() - t0}ms (cumulative)`)
 
+    console.log(`[timing] total ${Date.now() - t0}ms`)
     yield {
       phase: 'complete',
       result: {
