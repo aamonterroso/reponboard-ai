@@ -1,6 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
-import type { DetectedStack, DiscoveryResult, LLMAnalysisResult } from './types'
+import type {
+  ArchitectureInsights,
+  DetectedStack,
+  DiscoveryResult,
+  ExecutiveSummary,
+  ExplorationPathStep,
+  GitHubTreeNode,
+  LLMAnalysisResult,
+  LLMCorePartial,
+  LLMGuidePartial,
+  LLMKeyFile,
+  RefinedStack,
+} from './types'
 
 // ─── Tree Filtering ───────────────────────────────────────────────────────────
 
@@ -23,12 +35,55 @@ const EXCLUDED_SEGMENTS = new Set([
   '.cache',
 ])
 
+const NOISE_PATTERNS = [
+  /^node_modules\//,
+  /^\.git\//,
+  /^dist\//,
+  /^build\//,
+  /^\.next\//,
+  /^coverage\//,
+  /^\.turbo\//,
+  /^\.cache\//,
+  /^vendor\//,
+  /^target\//,           // Rust build dir
+  /^__pycache__\//,
+  /\.lock$/,             // package-lock.json, yarn.lock, pnpm-lock.yaml, Cargo.lock
+  /\.min\.(js|css)$/,
+  /\.map$/,
+  /\.(png|jpg|jpeg|gif|svg|ico|webp|mp4|mp3|woff2?|ttf|eot)$/i,
+]
+
+function filterTreeForPrompt(tree: GitHubTreeNode[]): GitHubTreeNode[] {
+  return tree.filter((node) => {
+    if (node.type !== 'blob') return true // keep dirs for structure
+    if (NOISE_PATTERNS.some((rx) => rx.test(node.path))) return false
+    if (node.size !== undefined && node.size > 500_000) return false // skip files >500KB
+    return true
+  })
+}
+
+function rankTreeEntries(entries: GitHubTreeNode[]): GitHubTreeNode[] {
+  return [...entries].sort((a, b) => {
+    const depthA = a.path.split('/').length
+    const depthB = b.path.split('/').length
+    if (depthA !== depthB) return depthA - depthB
+    return a.path.localeCompare(b.path)
+  })
+}
+
 function buildCondensedTree(tree: DiscoveryResult['tree']): string {
-  const filtered = tree.filter(
-    (node) => !node.path.split('/').some((seg) => EXCLUDED_SEGMENTS.has(seg))
+  const segmentFiltered = tree.filter(
+    (node) => !node.path.split('/').some((seg) => EXCLUDED_SEGMENTS.has(seg)),
   )
-  return filtered
-    .slice(0, 400)
+
+  const originalCount = tree.length
+  const filtered = filterTreeForPrompt(segmentFiltered)
+  console.log(`[timing] tree filtered ${originalCount} → ${filtered.length} entries`)
+
+  const prioritized = rankTreeEntries(filtered).slice(0, 300)
+  console.log(`[timing] tree capped to ${prioritized.length} entries (was ${filtered.length})`)
+
+  return prioritized
     .map((node) => `${node.type === 'tree' ? 'd' : 'f'} ${node.path}`)
     .join('\n')
 }
@@ -73,7 +128,7 @@ ${keyFiles
 ${buildCondensedTree(discovery.tree)}
 \`\`\``
 
-  return `${repoMeta}\n\n${heuristicGuess}\n\n${treeSection}\n\nYou have tools to explore this codebase. Call \`fetch_file\` to read specific files (entry points, key configs, main modules). Call \`list_directory\` to explore unfamiliar areas. Call \`search_code\` to find files by name pattern. When you have enough context to produce a thorough onboarding guide, call \`finish_analysis\` with the structured result.`
+  return `${repoMeta}\n\n${heuristicGuess}\n\n${treeSection}\n\nYou have tools to explore this codebase. Call \`fetch_file\` to read specific files (entry points, key configs, main modules). Call \`list_directory\` to explore unfamiliar areas. Call \`search_code\` to find files by name pattern. When you have enough context to describe the stack, summary, and architecture, call \`finish_core\` to submit the core analysis. After that you'll be asked to call \`finish_guide\` to submit the detailed onboarding guide.`
 }
 
 // ─── System Prompt ────────────────────────────────────────────────────────────
@@ -84,16 +139,24 @@ You have tools to explore a GitHub repository. Use them to gather evidence befor
 - fetch_file: read a file's contents (first 4000 chars)
 - list_directory: list files in a directory
 - search_code: find files by path substring
-- finish_analysis: submit the final structured onboarding analysis (TERMINATES the loop)
+
+You will produce the analysis in TWO phases:
+
+Phase 1 — Core architecture: Once you have explored enough to understand the stack, summary, and architecture pattern, call finish_core with refinedStack, executiveSummary, and architectureInsights.
+
+Phase 2 — Onboarding guide: After finish_core is captured, you will be prompted to produce the guide. You may explore additional files first if needed, then call finish_guide with keyFiles, explorationPath, and codebaseContext.
+
+IMPORTANT: You MUST call both finish_core and finish_guide. Do not skip either. Call finish_core first, then finish_guide.
 
 Strategy:
 1. Start by reading 2-4 critical files (entry points, main config, root README)
 2. Explore key directories if unclear
-3. Once you understand the project, call finish_analysis
+3. Once you understand the project, call finish_core
+4. After core is captured, optionally explore a few more files, then call finish_guide
 
-You have a budget of ~5 tool calls. The most important files are pre-loaded for you in the user message — do not refetch them. Use your tool calls only for files/directories you genuinely need but haven't seen yet.
+You have a total budget of ~7 tool calls across both phases. The most important files are pre-loaded for you in the user message — do not refetch them. Use your tool calls only for files/directories you genuinely need but haven't seen yet.
 
-Quality guidelines for finish_analysis:
+Quality guidelines for the structured outputs:
 - Be specific and concrete. Reference actual file names, function names, and patterns you observed via tools.
 - codebaseContext should be a dense 2-3 paragraph summary to serve as background for follow-up questions.
 - Size caps: keyFiles ≤ 10, explorationPath ≤ 5, keyDirectories ≤ 6, designDecisions ≤ 4, additionalLibraries ≤ 8.
@@ -103,25 +166,28 @@ Quality guidelines for finish_analysis:
 
 // ─── Tool Schemas ─────────────────────────────────────────────────────────────
 
-// JSON-schema for the finish_analysis tool — mirrors LLMAnalysisResult
-const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
+// Shared inner-property schemas (preserved exactly so length-guidance descriptions
+// stay attached when split across the two terminal tools).
+const REFINED_STACK_SCHEMA: Anthropic.Tool.InputSchema['properties'] = {
+  runtime: { type: 'string' },
+  framework: { type: 'string' },
+  language: { type: 'string' },
+  category: { type: 'string' },
+  packageManager: { type: 'string' },
+  hasTests: { type: 'boolean' },
+  hasDocker: { type: 'boolean' },
+  hasCi: { type: 'boolean' },
+  additionalLibraries: { type: 'array', items: { type: 'string' } },
+  confidence: { type: 'number' },
+  reasoning: { type: 'string' },
+}
+
+const FINISH_CORE_SCHEMA: Anthropic.Tool.InputSchema = {
   type: 'object',
   properties: {
     refinedStack: {
       type: 'object',
-      properties: {
-        runtime: { type: 'string' },
-        framework: { type: 'string' },
-        language: { type: 'string' },
-        category: { type: 'string' },
-        packageManager: { type: 'string' },
-        hasTests: { type: 'boolean' },
-        hasDocker: { type: 'boolean' },
-        hasCi: { type: 'boolean' },
-        additionalLibraries: { type: 'array', items: { type: 'string' } },
-        confidence: { type: 'number' },
-        reasoning: { type: 'string' },
-      },
+      properties: REFINED_STACK_SCHEMA,
       required: [
         'runtime',
         'framework',
@@ -140,8 +206,14 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
       type: 'object',
       properties: {
         oneLiner: { type: 'string' },
-        overview: { type: 'string' },
-        targetAudience: { type: 'string' },
+        overview: {
+          type: 'string',
+          description: '(2-3 sentences max, ~250 chars)',
+        },
+        targetAudience: {
+          type: 'string',
+          description: '(1 sentence, ~120 chars)',
+        },
       },
       required: ['oneLiner', 'overview', 'targetAudience'],
     },
@@ -168,7 +240,7 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
         patternDescription: {
           type: 'string',
           description:
-            'A 1-2 sentence rich description of the architecture (e.g. "Monorepo with two-layer analysis pipeline: heuristic discovery feeds an LLM refinement layer, exposed via a Next.js streaming API."). This is the descriptive text shown to the user as a subtitle.',
+            'A 1-2 sentence rich description of the architecture (e.g. "Monorepo with two-layer analysis pipeline: heuristic discovery feeds an LLM refinement layer, exposed via a Next.js streaming API."). This is the descriptive text shown to the user as a subtitle. (1-2 sentences, ~200 chars)',
         },
         keyDirectories: {
           type: 'array',
@@ -195,14 +267,27 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
       },
       required: ['pattern', 'patternDescription', 'keyDirectories', 'designDecisions'],
     },
+  },
+  required: ['refinedStack', 'executiveSummary', 'architectureInsights'],
+}
+
+const FINISH_GUIDE_SCHEMA: Anthropic.Tool.InputSchema = {
+  type: 'object',
+  properties: {
     keyFiles: {
       type: 'array',
       items: {
         type: 'object',
         properties: {
           path: { type: 'string' },
-          whatItDoes: { type: 'string' },
-          whyImportant: { type: 'string' },
+          whatItDoes: {
+            type: 'string',
+            description: '(1 sentence, ~150 chars)',
+          },
+          whyImportant: {
+            type: 'string',
+            description: '(1 sentence, ~120 chars)',
+          },
           category: { type: 'string' },
         },
         required: ['path', 'whatItDoes', 'whyImportant', 'category'],
@@ -215,23 +300,23 @@ const FINISH_ANALYSIS_SCHEMA: Anthropic.Tool.InputSchema = {
         properties: {
           order: { type: 'number' },
           title: { type: 'string' },
-          description: { type: 'string' },
+          description: {
+            type: 'string',
+            description: '(2 sentences max, ~200 chars)',
+          },
           files: { type: 'array', items: { type: 'string' } },
           estimatedMinutes: { type: 'number' },
         },
         required: ['order', 'title', 'description', 'files', 'estimatedMinutes'],
       },
     },
-    codebaseContext: { type: 'string' },
+    codebaseContext: {
+      type: 'string',
+      description:
+        "(short paragraph, ~300 chars max — only what you couldn't fit elsewhere)",
+    },
   },
-  required: [
-    'refinedStack',
-    'executiveSummary',
-    'architectureInsights',
-    'keyFiles',
-    'explorationPath',
-    'codebaseContext',
-  ],
+  required: ['keyFiles', 'explorationPath', 'codebaseContext'],
 }
 
 export const EXPLORATION_TOOLS: Anthropic.Tool[] = [
@@ -286,13 +371,23 @@ export const EXPLORATION_TOOLS: Anthropic.Tool[] = [
   },
 ]
 
-const ANALYSIS_TOOLS: Anthropic.Tool[] = [
+const CORE_TOOLS: Anthropic.Tool[] = [
   ...EXPLORATION_TOOLS,
   {
-    name: 'finish_analysis',
+    name: 'finish_core',
     description:
-      'Submit the final structured onboarding analysis. Call ONLY when you have enough context. This terminates the loop.',
-    input_schema: FINISH_ANALYSIS_SCHEMA,
+      'Submit the core structural analysis: stack, summary, and architecture. Call this FIRST after exploring the repo. After this is captured, you will be asked to produce the detailed onboarding guide.',
+    input_schema: FINISH_CORE_SCHEMA,
+  },
+]
+
+const GUIDE_TOOLS: Anthropic.Tool[] = [
+  ...EXPLORATION_TOOLS,
+  {
+    name: 'finish_guide',
+    description:
+      'Submit the detailed onboarding guide: key files (categorized), exploration path (5-step journey), and any additional codebase context. Call this AFTER finish_core.',
+    input_schema: FINISH_GUIDE_SCHEMA,
   },
 ]
 
@@ -389,9 +484,12 @@ export type LLMStreamEvent =
       toolCall?: string
       toolInput?: Record<string, unknown>
     }
+  | { type: 'partial_core'; core: LLMCorePartial }
+  | { type: 'partial_guide'; guide: LLMGuidePartial }
   | { type: 'result'; result: LLMAnalysisResult }
 
-const MAX_TOOL_CALLS = 5
+const MAX_TOOL_CALLS_CORE = 4
+const MAX_TOOL_CALLS_GUIDE = 3
 
 // ─── Result Validation & Normalization ────────────────────────────────────────
 
@@ -423,22 +521,21 @@ const VALID_PATTERNS = [
 type ArchPattern = (typeof VALID_PATTERNS)[number]
 
 // Anthropic sometimes returns tool_use inputs that don't fully match the schema
-// (e.g. omitting top-level fields when under MAX_TOOL_CALLS pressure). Instead
-// of throwing — which kills the whole analysis — coerce the result into a
-// fully-shaped LLMAnalysisResult by filling missing fields with sensible
-// fallbacks (heuristic discovery data where applicable, empty defaults
-// otherwise). Only throw if the LLM returned no object at all.
-function coerceLLMAnalysisResult(
+// (e.g. omitting top-level fields when under tool-budget pressure). Instead of
+// throwing — which kills the whole analysis — coerce the result into a
+// fully-shaped partial by filling missing fields with sensible fallbacks
+// (heuristic discovery data where applicable, empty defaults otherwise). Only
+// throw if the LLM returned no object at all.
+function coerceCorePartial(
   value: unknown,
   discoveryStack: DetectedStack,
-): LLMAnalysisResult {
+): LLMCorePartial {
   if (typeof value !== 'object' || value === null) {
-    throw new Error('finish_analysis returned non-object')
+    throw new Error('finish_core returned non-object')
   }
   const v = value as Record<string, unknown>
 
-  // Step B — refinedStack
-  let refinedStack: LLMAnalysisResult['refinedStack']
+  let refinedStack: RefinedStack
   if (typeof v.refinedStack !== 'object' || v.refinedStack === null) {
     console.warn('[LLM] refinedStack missing, falling back to discovery stack')
     refinedStack = {
@@ -479,8 +576,7 @@ function coerceLLMAnalysisResult(
     }
   }
 
-  // Step C — executiveSummary
-  let executiveSummary: LLMAnalysisResult['executiveSummary']
+  let executiveSummary: ExecutiveSummary
   if (typeof v.executiveSummary !== 'object' || v.executiveSummary === null) {
     console.warn('[LLM] executiveSummary missing, using minimal fallback')
     executiveSummary = {
@@ -499,8 +595,7 @@ function coerceLLMAnalysisResult(
     }
   }
 
-  // Step D — architectureInsights
-  let architectureInsights: LLMAnalysisResult['architectureInsights']
+  let architectureInsights: ArchitectureInsights
   if (
     typeof v.architectureInsights !== 'object' ||
     v.architectureInsights === null
@@ -533,43 +628,58 @@ function coerceLLMAnalysisResult(
           ? ai.patternDescription
           : '',
       keyDirectories: Array.isArray(ai.keyDirectories)
-        ? (ai.keyDirectories as LLMAnalysisResult['architectureInsights']['keyDirectories'])
+        ? (ai.keyDirectories as ArchitectureInsights['keyDirectories'])
         : [],
       designDecisions: Array.isArray(ai.designDecisions)
-        ? (ai.designDecisions as LLMAnalysisResult['architectureInsights']['designDecisions'])
+        ? (ai.designDecisions as ArchitectureInsights['designDecisions'])
         : [],
     }
   }
 
-  // Step E — keyFiles
-  let keyFiles: LLMAnalysisResult['keyFiles']
+  return { refinedStack, executiveSummary, architectureInsights }
+}
+
+function coerceGuidePartial(value: unknown): LLMGuidePartial {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('finish_guide returned non-object')
+  }
+  const v = value as Record<string, unknown>
+
+  let keyFiles: LLMKeyFile[]
   if (!Array.isArray(v.keyFiles)) {
     console.warn('[LLM] keyFiles missing, defaulting to []')
     keyFiles = []
   } else {
-    keyFiles = v.keyFiles as LLMAnalysisResult['keyFiles']
+    keyFiles = v.keyFiles as LLMKeyFile[]
   }
 
-  // Step F — explorationPath
-  let explorationPath: LLMAnalysisResult['explorationPath']
+  let explorationPath: ExplorationPathStep[]
   if (!Array.isArray(v.explorationPath)) {
     console.warn('[LLM] explorationPath missing, defaulting to []')
     explorationPath = []
   } else {
-    explorationPath = v.explorationPath as LLMAnalysisResult['explorationPath']
+    explorationPath = v.explorationPath as ExplorationPathStep[]
   }
 
-  // Step G — codebaseContext
   const codebaseContext =
     typeof v.codebaseContext === 'string' ? v.codebaseContext : ''
 
+  return { keyFiles, explorationPath, codebaseContext }
+}
+
+// Thin wrapper that merges a core partial and a guide partial into the
+// fully-shaped LLMAnalysisResult consumed by the rest of the pipeline.
+function mergePartials(
+  core: LLMCorePartial,
+  guide: LLMGuidePartial,
+): LLMAnalysisResult {
   return {
-    refinedStack,
-    executiveSummary,
-    architectureInsights,
-    keyFiles,
-    explorationPath,
-    codebaseContext,
+    refinedStack: core.refinedStack,
+    executiveSummary: core.executiveSummary,
+    architectureInsights: core.architectureInsights,
+    keyFiles: guide.keyFiles,
+    explorationPath: guide.explorationPath,
+    codebaseContext: guide.codebaseContext,
   }
 }
 
@@ -653,86 +763,111 @@ function formatPrefetchedContent(contents: Map<string, string>): string {
 
 // ─── Main Tool Loop ───────────────────────────────────────────────────────────
 
-export async function* analyzeWithLLMStream(
-  discovery: DiscoveryResult,
-  githubClient: GitHubClient,
-  repoContext: { owner: string; repo: string; branch: string },
-  apiKey: string,
-  mode: LLMMode = 'production',
-): AsyncGenerator<LLMStreamEvent> {
-  const client = new Anthropic({ apiKey })
-  const model = MODELS[mode]
+interface PhaseContext {
+  client: Anthropic
+  model: string
+  messages: Anthropic.MessageParam[]
+  finishToolName: 'finish_core' | 'finish_guide'
+  tools: Anthropic.Tool[]
+  maxToolCalls: number
+  githubClient: GitHubClient
+  discovery: DiscoveryResult
+  repoContext: { owner: string; repo: string; branch: string }
+  counters: { iter: number; toolCalls: number }
+  llmStart: number
+}
 
-  // Pre-fetch top key files in parallel so the agent has immediate context
-  // and doesn't burn its tool budget on obvious fetches.
-  const prefetched = await prefetchTopKeyFiles(
-    discovery,
-    githubClient,
-    repoContext,
-  )
-  const initialUser =
-    buildInitialUserPrompt(discovery) + formatPrefetchedContent(prefetched)
+// Run a single ReAct phase. Yields thinking events as the agent works, and
+// returns the captured finish tool_use block (or null if the phase exhausted
+// its iteration budget without one). Mutates `ctx.messages` so the caller can
+// continue the conversation in the next phase.
+async function* runReactPhase(
+  ctx: PhaseContext,
+): AsyncGenerator<LLMStreamEvent, Anthropic.ToolUseBlock | null> {
+  const phaseMaxIterations = ctx.maxToolCalls + 3
+  let phaseIter = 0
 
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: initialUser },
-  ]
+  while (phaseIter < phaseMaxIterations) {
+    phaseIter++
+    ctx.counters.iter++
+    const iterStart = Date.now()
+    console.log(
+      `[timing] llm iter ${ctx.counters.iter} starting at +${iterStart - ctx.llmStart}ms`,
+    )
 
-  let toolCallCount = 0
-  let loopIteration = 0
-  const MAX_ITERATIONS = MAX_TOOL_CALLS + 3 // allow a couple extra for post-budget finish
+    const isForced = ctx.counters.toolCalls >= ctx.maxToolCalls
+    if (isForced) {
+      console.log(
+        `[timing] forcing ${ctx.finishToolName} via tool_choice (budget exceeded)`,
+      )
+    }
 
-  while (loopIteration < MAX_ITERATIONS) {
-    loopIteration++
-
-    const response = await client.messages.create({
-      model,
-      max_tokens: 4096,
+    const apiStart = Date.now()
+    const response = await ctx.client.messages.create({
+      model: ctx.model,
+      max_tokens: 2000,
       system: SYSTEM_PROMPT,
-      tools: ANALYSIS_TOOLS,
-      messages,
+      tools: ctx.tools,
+      messages: ctx.messages,
+      ...(isForced
+        ? {
+            tool_choice: {
+              type: 'tool' as const,
+              name: ctx.finishToolName,
+            },
+          }
+        : {}),
     })
+    console.log(`[timing] anthropic api call took ${Date.now() - apiStart}ms`)
 
-    // Check for finish_analysis first — that's the terminal signal
     const finishBlock = response.content.find(
       (b): b is Anthropic.ToolUseBlock =>
-        b.type === 'tool_use' && b.name === 'finish_analysis',
+        b.type === 'tool_use' && b.name === ctx.finishToolName,
     )
     if (finishBlock !== undefined) {
       yield {
         type: 'thinking',
         message: 'Finalizing analysis...',
-        toolCall: 'finish_analysis',
+        toolCall: ctx.finishToolName,
       }
-      // Validate the tool input matches the expected schema before handing it
-      // to the UI. Throws on malformed results so the caller can fall back to
-      // discovery-only output instead of rendering a broken page.
-      const coerced = coerceLLMAnalysisResult(finishBlock.input, discovery.stack)
-      const normalized = normalizeLLMAnalysisResult(coerced)
-      yield { type: 'result', result: normalized }
-      return
+      // Append the finish call + a synthetic tool_result so the next phase can
+      // continue from this conversation state.
+      ctx.messages.push({ role: 'assistant', content: response.content })
+      const finalResults: Anthropic.ToolResultBlockParam[] = response.content
+        .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
+        .map((b) => ({
+          type: 'tool_result' as const,
+          tool_use_id: b.id,
+          content:
+            b.name === 'finish_core'
+              ? 'Core captured. Now produce the detailed onboarding guide by calling finish_guide. You may explore additional files first if needed.'
+              : b.name === 'finish_guide'
+                ? 'Guide captured.'
+                : 'Skipped — proceeding to next phase.',
+        }))
+      ctx.messages.push({ role: 'user', content: finalResults })
+      return finishBlock
     }
 
-    // Collect exploration tool calls
     const toolUses = response.content.filter(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
     )
 
     if (toolUses.length === 0) {
-      // Agent gave only text — nudge it toward finish_analysis
-      messages.push({ role: 'assistant', content: response.content })
-      messages.push({
+      // Agent produced only text — nudge it toward the finish tool.
+      ctx.messages.push({ role: 'assistant', content: response.content })
+      ctx.messages.push({
         role: 'user',
-        content:
-          'Please call finish_analysis now with your structured onboarding analysis.',
+        content: `Please call ${ctx.finishToolName} now with your structured result.`,
       })
       continue
     }
 
-    const budgetExceeded = toolCallCount >= MAX_TOOL_CALLS
+    const budgetExceeded = ctx.counters.toolCalls >= ctx.maxToolCalls
     const toolResults: Anthropic.ToolResultBlockParam[] = []
 
     for (const toolUse of toolUses) {
-      toolCallCount++
+      ctx.counters.toolCalls++
       const pathOrQuery =
         typeof toolUse.input === 'object' &&
         toolUse.input !== null &&
@@ -754,19 +889,24 @@ export async function* analyzeWithLLMStream(
         toolInput: toolUse.input as Record<string, unknown>,
       }
 
+      const truncatedInput =
+        pathOrQuery.length > 40 ? pathOrQuery.slice(0, 40) : pathOrQuery
+      const toolStart = Date.now()
       let resultText: string
       if (budgetExceeded) {
-        resultText =
-          'TOOL BUDGET EXHAUSTED. Do not call any more exploration tools. Call finish_analysis immediately with your best analysis.'
+        resultText = `TOOL BUDGET EXHAUSTED. Do not call any more exploration tools. Call ${ctx.finishToolName} immediately with your best result.`
       } else {
         resultText = await executeExplorationTool(
           toolUse.name,
           toolUse.input,
-          discovery.tree,
-          githubClient,
-          repoContext,
+          ctx.discovery.tree,
+          ctx.githubClient,
+          ctx.repoContext,
         )
       }
+      console.log(
+        `[timing] tool ${toolUse.name} (${truncatedInput}) took ${Date.now() - toolStart}ms`,
+      )
 
       toolResults.push({
         type: 'tool_result',
@@ -775,13 +915,100 @@ export async function* analyzeWithLLMStream(
       })
     }
 
-    messages.push({ role: 'assistant', content: response.content })
-    messages.push({ role: 'user', content: toolResults })
+    ctx.messages.push({ role: 'assistant', content: response.content })
+    ctx.messages.push({ role: 'user', content: toolResults })
   }
 
-  throw new Error(
-    `Analysis exceeded max ${MAX_ITERATIONS} loop iterations without calling finish_analysis`,
+  return null
+}
+
+export async function* analyzeWithLLMStream(
+  discovery: DiscoveryResult,
+  githubClient: GitHubClient,
+  repoContext: { owner: string; repo: string; branch: string },
+  apiKey: string,
+  mode: LLMMode = 'production',
+): AsyncGenerator<LLMStreamEvent> {
+  const client = new Anthropic({ apiKey })
+  const model = MODELS[mode]
+
+  const llmStart = Date.now()
+  const counters = { iter: 0, toolCalls: 0 }
+  console.log('[timing] llm loop start')
+
+  // Pre-fetch top key files in parallel so the agent has immediate context
+  // and doesn't burn its tool budget on obvious fetches.
+  const prefetched = await prefetchTopKeyFiles(
+    discovery,
+    githubClient,
+    repoContext,
   )
+  console.log(
+    `[timing] key files fetched in ${Date.now() - llmStart}ms (cumulative since llm stage start)`,
+  )
+  const initialUser =
+    buildInitialUserPrompt(discovery) + formatPrefetchedContent(prefetched)
+
+  const messages: Anthropic.MessageParam[] = [
+    { role: 'user', content: initialUser },
+  ]
+
+  // ─── PHASE 1: Core (refinedStack + executiveSummary + architectureInsights) ──
+  console.log('[timing] phase 1 (core) start')
+  const phase1Start = Date.now()
+  const coreBlock = yield* runReactPhase({
+    client,
+    model,
+    messages,
+    finishToolName: 'finish_core',
+    tools: CORE_TOOLS,
+    maxToolCalls: MAX_TOOL_CALLS_CORE,
+    githubClient,
+    discovery,
+    repoContext,
+    counters,
+    llmStart,
+  })
+  console.log(`[timing] phase 1 done in ${Date.now() - phase1Start}ms`)
+  if (coreBlock === null) {
+    throw new Error(
+      'Phase 1 (core) exhausted iterations without producing finish_core',
+    )
+  }
+  const corePartial = coerceCorePartial(coreBlock.input, discovery.stack)
+  yield { type: 'partial_core', core: corePartial }
+
+  // ─── PHASE 2: Guide (keyFiles + explorationPath + codebaseContext) ───────────
+  console.log('[timing] phase 2 (guide) start')
+  const phase2Start = Date.now()
+  const guideBlock = yield* runReactPhase({
+    client,
+    model,
+    messages,
+    finishToolName: 'finish_guide',
+    tools: GUIDE_TOOLS,
+    maxToolCalls: MAX_TOOL_CALLS_GUIDE,
+    githubClient,
+    discovery,
+    repoContext,
+    counters,
+    llmStart,
+  })
+  console.log(`[timing] phase 2 done in ${Date.now() - phase2Start}ms`)
+  if (guideBlock === null) {
+    throw new Error(
+      'Phase 2 (guide) exhausted iterations without producing finish_guide',
+    )
+  }
+  const guidePartial = coerceGuidePartial(guideBlock.input)
+  yield { type: 'partial_guide', guide: guidePartial }
+
+  const merged = mergePartials(corePartial, guidePartial)
+  const normalized = normalizeLLMAnalysisResult(merged)
+  console.log(
+    `[timing] llm loop exit after ${counters.iter} iterations, total ${Date.now() - llmStart}ms`,
+  )
+  yield { type: 'result', result: normalized }
 }
 
 // ─── Non-streaming Convenience Wrapper ────────────────────────────────────────

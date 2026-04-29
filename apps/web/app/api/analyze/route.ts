@@ -26,6 +26,9 @@ function sanitizeGitHubUrl(rawUrl: string): string {
 }
 
 export async function POST(request: Request): Promise<NextResponse | Response> {
+  const reqStart = Date.now()
+  console.log(`[timing] request received`)
+
   let body: unknown
   try {
     body = await request.json()
@@ -111,10 +114,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         }
 
         const timeout = setTimeout(
-          () =>
+          () => {
+            console.log(`[timing] timeout reached at ${Date.now() - reqStart}ms`)
             closeStream(
               'Analysis timed out. The repository may be too large — please try a smaller repo.',
-            ),
+            )
+          },
           TIMEOUT_MS,
         )
 
@@ -126,9 +131,13 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
             if (event.phase === 'complete') {
               incrementRateLimit(ip)
             }
+            if (event.phase === 'complete' || event.phase === 'error') {
+              console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
+            }
             controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
           }
         } catch (err) {
+          console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
           closeStream(err instanceof Error ? err.message : 'Stream error')
         } finally {
           clearTimeout(timeout)

@@ -102,6 +102,7 @@ export async function runDiscovery(
     client.getRepoInfo(owner, repo),
     client.getTree(owner, repo, parsed.branch ?? undefined),
   ])
+  console.log(`[timing] raw tree has ${tree.length} entries`)
 
   // 5. Compute tree stats
   const { totalFiles, totalDirectories } = computeTreeStats(tree)
