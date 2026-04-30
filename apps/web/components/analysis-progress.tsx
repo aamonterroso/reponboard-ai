@@ -10,7 +10,6 @@ interface AnalysisProgressProps {
 
 const PHASES: { phase: AnalysisPhase; label: string }[] = [
   { phase: 'discovery', label: 'Scanning repository' },
-  { phase: 'fetching', label: 'Fetching key files' },
   { phase: 'analyzing', label: 'Analyzing with AI' },
   { phase: 'complete', label: 'Complete' },
 ]
@@ -29,7 +28,6 @@ function getStepState(
 
 export function AnalysisProgress({
   currentPhase,
-  progress,
   message,
 }: AnalysisProgressProps) {
   return (
@@ -43,10 +41,7 @@ export function AnalysisProgress({
         const connectorColor =
           isDone || isActive ? 'bg-emerald-500/40' : 'bg-zinc-800'
 
-        const displayMessage =
-          isActive && step.phase === 'fetching' && progress != null
-            ? `${message} · ${progress.current}/${progress.total} files`
-            : message
+        const displayMessage = message
 
         return (
           <div key={step.phase} className="flex items-start gap-3 relative">

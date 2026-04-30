@@ -1,15 +1,17 @@
 export const runtime = 'edge'
 
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
+import type { LLMModelIntent } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
-// 60s is the code-level cap so local dev / Vercel Pro can run to completion.
-// NOTE: Vercel Edge on the free (Hobby) plan will still hard-kill the function
-// at ~30s regardless of this value. The streaming response shows progress up to
-// that point so the client at least sees activity before any forced cutoff.
-const TIMEOUT_MS = 60_000
+// Code-level cap on the analysis. Verified empirically that
+// Vercel Edge on the Hobby plan supports up to ~300s when the
+// response is streamed (test endpoint /timeout-test ran 89.91s
+// to completion). 120s gives Sonnet enough headroom for large
+// repos while still bounding worst-case behavior.
+const TIMEOUT_MS = 120_000
 
 function getClientIp(request: Request): string {
   return (
@@ -92,8 +94,28 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
 
   if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
-    const llmMode = (process.env.LLM_MODE ?? 'production') as 'development' | 'production'
-    const generator = runFullAnalysisStream(repoUrl, githubToken, anthropicApiKey, llmMode)
+    const rawIntent = process.env.LLM_MODEL_INTENT
+    const rawMode = process.env.LLM_MODE
+    let intent: LLMModelIntent | undefined
+    let llmMode: 'development' | 'production' = 'production'
+
+    if (rawIntent === 'fast' || rawIntent === 'quality' || rawIntent === 'parity') {
+      intent = rawIntent
+    } else if (rawMode === 'development' || rawMode === 'production') {
+      console.warn(
+        '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
+          '"fast" | "quality" | "parity" instead.',
+      )
+      llmMode = rawMode
+    }
+
+    const generator = runFullAnalysisStream(
+      repoUrl,
+      githubToken,
+      anthropicApiKey,
+      llmMode,
+      intent,
+    )
     const encoder = new TextEncoder()
 
     const stream = new ReadableStream({

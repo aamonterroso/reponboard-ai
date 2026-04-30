@@ -1,8 +1,13 @@
 import { GitHubClient, parseGitHubUrl } from './github'
 import { runDiscovery } from './discovery'
-import { analyzeWithLLM, analyzeWithLLMStream } from './llm-analysis'
-import type { LLMMode } from './llm-analysis'
+import {
+  analyzeWithLLM,
+  analyzeWithLLMStream,
+  INTENT_TO_MODEL,
+} from './llm-analysis'
+import type { LLMMode, LLMModelIntent } from './llm-analysis'
 import type {
+  AnalysisMeta,
   AnalysisProgressEvent,
   FullAnalysisResult,
   LLMAnalysisResult,
@@ -15,9 +20,20 @@ export async function runFullAnalysis(
   githubToken: string | undefined,
   anthropicApiKey: string,
   llmMode: LLMMode = 'production',
+  intent?: LLMModelIntent,
 ): Promise<FullAnalysisResult> {
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
+
+  const resolvedIntent: LLMModelIntent =
+    intent ?? (llmMode === 'development' ? 'fast' : 'quality')
+  const model = INTENT_TO_MODEL[resolvedIntent]
+  const deprecatedModeUsed = intent === undefined
+  const meta: AnalysisMeta = {
+    model,
+    intent: resolvedIntent,
+    deprecatedModeUsed,
+  }
 
   // Layer 1: heuristic discovery
   const discovery = await runDiscovery(repoUrl, githubToken)
@@ -37,6 +53,7 @@ export async function runFullAnalysis(
       { owner, repo, branch: resolvedBranch },
       anthropicApiKey,
       llmMode,
+      intent,
     )
   } catch (err) {
     console.error('[analyzeWithLLM] Error:', err)
@@ -50,6 +67,7 @@ export async function runFullAnalysis(
     discovery,
     llmAnalysis,
     error,
+    meta,
     createdAt,
     completedAt: new Date().toISOString(),
   }
@@ -62,11 +80,22 @@ export async function* runFullAnalysisStream(
   githubToken: string | undefined,
   anthropicApiKey: string,
   llmMode: LLMMode = 'production',
+  intent?: LLMModelIntent,
 ): AsyncGenerator<AnalysisProgressEvent> {
   const t0 = Date.now()
   console.log('[timing] analysis start')
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
+
+  const resolvedIntent: LLMModelIntent =
+    intent ?? (llmMode === 'development' ? 'fast' : 'quality')
+  const model = INTENT_TO_MODEL[resolvedIntent]
+  const deprecatedModeUsed = intent === undefined
+  const meta: AnalysisMeta = {
+    model,
+    intent: resolvedIntent,
+    deprecatedModeUsed,
+  }
 
   try {
     yield { phase: 'discovery', message: 'Scanning repository structure...' }
@@ -89,6 +118,7 @@ export async function* runFullAnalysisStream(
         { owner, repo, branch: resolvedBranch },
         anthropicApiKey,
         llmMode,
+        intent,
       )) {
         if (event.type === 'thinking') {
           const base: {
@@ -127,6 +157,7 @@ export async function* runFullAnalysisStream(
         discovery,
         llmAnalysis,
         error,
+        meta,
         createdAt,
         completedAt: new Date().toISOString(),
       },

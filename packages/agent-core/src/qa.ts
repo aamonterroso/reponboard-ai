@@ -2,8 +2,10 @@ import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
 import {
   EXPLORATION_TOOLS,
+  INTENT_TO_MODEL,
   executeExplorationTool,
   type LLMMode,
+  type LLMModelIntent,
 } from './llm-analysis'
 import type {
   GitHubTreeNode,
@@ -41,13 +43,6 @@ function buildTreeSummary(tree: GitHubTreeNode[]): string {
     .map((n) => `${n.type === 'tree' ? 'd' : 'f'} ${n.path}`)
   return filtered.join('\n')
 }
-
-// ─── Model Configuration ──────────────────────────────────────────────────────
-
-const MODELS = {
-  development: 'claude-haiku-4-5-20251001',
-  production: 'claude-sonnet-4-20250514',
-} as const
 
 const MAX_TOOL_CALLS = 3
 const MAX_ITERATIONS = MAX_TOOL_CALLS + 3
@@ -127,11 +122,18 @@ export async function* answerQuestion(
   anthropicApiKey: string,
   githubToken?: string,
   mode: LLMMode = 'production',
+  intent?: LLMModelIntent,
 ): AsyncGenerator<QAProgressEvent> {
   try {
     const client = new Anthropic({ apiKey: anthropicApiKey })
     const githubClient = new GitHubClient(githubToken)
-    const model = MODELS[mode]
+    const resolvedIntent: LLMModelIntent =
+      intent ?? (mode === 'development' ? 'fast' : 'quality')
+    const model = INTENT_TO_MODEL[resolvedIntent]
+    console.log(
+      `[LLM] Q&A using ${model} (intent: ${resolvedIntent}, ` +
+        `caller passed: ${intent !== undefined ? 'intent=' + intent : 'mode=' + mode})`,
+    )
 
     // Fetch tree once so exploration tools can reference it without extra API calls
     const tree = await githubClient.getTree(

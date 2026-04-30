@@ -5,12 +5,18 @@ import {
   GitHubClient,
   answerQuestion,
   parseGitHubUrl,
+  type LLMModelIntent,
   type QAMessage,
 } from '@reponboard/agent-core'
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
-const TIMEOUT_MS = 60_000
+// Code-level cap on the analysis. Verified empirically that
+// Vercel Edge on the Hobby plan supports up to ~300s when the
+// response is streamed (test endpoint /timeout-test ran 89.91s
+// to completion). 120s gives Sonnet enough headroom for large
+// repos while still bounding worst-case behavior.
+const TIMEOUT_MS = 120_000
 const MAX_QUESTION_LEN = 500
 const MAX_HISTORY_ITEMS = 20
 
@@ -163,9 +169,20 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     }
   }
 
-  const llmMode = (process.env.LLM_MODE ?? 'production') as
-    | 'development'
-    | 'production'
+  const rawIntent = process.env.LLM_MODEL_INTENT
+  const rawMode = process.env.LLM_MODE
+  let intent: LLMModelIntent | undefined
+  let llmMode: 'development' | 'production' = 'production'
+
+  if (rawIntent === 'fast' || rawIntent === 'quality' || rawIntent === 'parity') {
+    intent = rawIntent
+  } else if (rawMode === 'development' || rawMode === 'production') {
+    console.warn(
+      '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
+        '"fast" | "quality" | "parity" instead.',
+    )
+    llmMode = rawMode
+  }
 
   const generator = answerQuestion(
     parsed.question,
@@ -175,6 +192,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     anthropicApiKey,
     githubToken,
     llmMode,
+    intent,
   )
 
   const encoder = new TextEncoder()
