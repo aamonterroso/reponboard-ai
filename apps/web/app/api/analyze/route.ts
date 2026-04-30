@@ -5,11 +5,12 @@ import { NextResponse } from 'next/server'
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
-// 60s is the code-level cap so local dev / Vercel Pro can run to completion.
-// NOTE: Vercel Edge on the free (Hobby) plan will still hard-kill the function
-// at ~30s regardless of this value. The streaming response shows progress up to
-// that point so the client at least sees activity before any forced cutoff.
-const TIMEOUT_MS = 60_000
+// Code-level cap on the analysis. Verified empirically that
+// Vercel Edge on the Hobby plan supports up to ~300s when the
+// response is streamed (test endpoint /timeout-test ran 89.91s
+// to completion). 120s gives Sonnet enough headroom for large
+// repos while still bounding worst-case behavior.
+const TIMEOUT_MS = 120_000
 
 function getClientIp(request: Request): string {
   return (

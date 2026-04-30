@@ -105,10 +105,6 @@ export function UrlInput(): React.JSX.Element {
               if (event.phase === 'discovery') {
                 setCurrentPhase('discovery')
                 setStreamMessage(event.message ?? '')
-              } else if (event.phase === 'fetching') {
-                setCurrentPhase('fetching')
-                setStreamMessage(event.message ?? '')
-                if (event.progress) setProgress(event.progress as { current: number; total: number })
               } else if (event.phase === 'analyzing') {
                 setCurrentPhase('analyzing')
                 setStreamMessage(event.message ?? '')

@@ -75,13 +75,19 @@ GitHub URL
 ### Streaming Event Format
 
 Progress events:
-- `{ "phase": "discovery", "message": "Scanning repository structure..." }`
-- `{ "phase": "fetching", "message": "Fetching 8 key files...", "progress": { "current": 3, "total": 8 } }`
-- `{ "phase": "analyzing", "message": "AI is analyzing the codebase..." }`
+- `{ "phase": "discovery", "message": "..." }`
+- `{ "phase": "analyzing", "message": "..." }`
+- `{ "phase": "thinking", "message": "...", "toolCall": "...", "toolInput": {...} }`
+- `{ "phase": "partial_core", "core": { ...refinedStack, executiveSummary, architectureInsights } }`
+- `{ "phase": "partial_guide", "guide": { ...keyFiles, explorationPath, codebaseContext } }`
 
 Terminal events:
 - `{ "phase": "complete", "result": { /* FullAnalysisResult */ } }`
-- `{ "phase": "error", "error": "Rate limited by GitHub API" }`
+- `{ "phase": "error", "error": "..." }`
+
+Note: 'fetching' is reserved in the AnalysisPhase type but
+not currently emitted — it was removed when the ReAct agent
+stopped batching file fetches into a discrete phase.
 
 ## Tech Stack
 
@@ -165,22 +171,47 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 ## Current Status
 
 ### Completed
-- ✅ Two-layer analysis (heuristics + LLM)
-- ✅ Dual model support (Haiku dev / Sonnet prod)
-- ✅ JSON truncation repair
-- ✅ Key files limit (top 12)
+- ✅ Two-layer analysis (heuristic discovery + LLM with tool_use)
+- ✅ Dual model support (Haiku dev / Sonnet prod via LLM_MODE)
+- ✅ ReAct agent with finish_core + finish_guide tool split
+- ✅ Defensive coercion (coerceCorePartial / coerceGuidePartial)
+   — falls back to Layer 1 defaults when LLM omits fields
+- ✅ NDJSON streaming (discovery → analyzing → thinking →
+   partial_core → partial_guide → complete)
+- ✅ Architecture pattern enum (10 values) + patternDescription
+- ✅ Onboarding Journey timeline with checkmarks + progress
+- ✅ Q&A ReAct agent with off-topic guardrail
+- ✅ Empirically verified Edge runtime headroom (see Tech Debt
+   for migration to test endpoint)
 
 ### In Progress
-- 🔄 Streaming + real loading states
+- 🔄 Frontend cascade UX consuming partial_core / partial_guide
+- 🔄 LLM_MODEL_INTENT refactor (replacing LLM_MODE with
+   explicit fast/quality/parity intent)
 
 ### Backlog
-1. UI polish with shadcn (2-3 hrs)
-2. Collapsible sections (1 hr)
-3. Exploration cache (1-2 hrs)
-4. CLI wrapper (2 hrs)
+1. Basic test suite with vitest (currently zero tests, script
+   exists but dependency not installed)
+2. Validate LLM-returned enum fields at runtime (runtime,
+   framework, etc are currently cast unchecked)
+3. Eliminate duplications between apps/web and agent-core
+   (GITHUB_URL_REGEX, getClientIp, closeStream, NDJSON consumer)
+4. Cache GitHub tree across Q&A turns
+5. Session persistence (journey progress + analysis result
+   across page refreshes)
+6. Cached analyses by repo+SHA (Vercel KV)
 
 ### Tech Debt
-- Migrate `llm-analysis.ts` from text parsing to `tool_use` for structured outputs
+- Split llm-analysis.ts (1033 lines, 5 mixed concerns:
+   schemas, prompts, ReAct loop, coercion, streaming)
+- Rate limiter is in-memory in Edge runtime — multi-region
+   execution makes the global limit effectively N×limit
+- Frontend has the analysis-progress.tsx 'progress' prop
+   unused since the 'fetching' phase was removed; reintroduce
+   if granular progress comes back
+- aria-expanded + focus management on collapsibles/dialog
+- next lint is deprecated in Next.js 16 — eventually migrate
+   to ESLint CLI
 
 ## Resources
 
