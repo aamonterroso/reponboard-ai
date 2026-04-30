@@ -1,6 +1,7 @@
 export const runtime = 'edge'
 
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
+import type { LLMModelIntent } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
 
@@ -93,8 +94,28 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
 
   if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
-    const llmMode = (process.env.LLM_MODE ?? 'production') as 'development' | 'production'
-    const generator = runFullAnalysisStream(repoUrl, githubToken, anthropicApiKey, llmMode)
+    const rawIntent = process.env.LLM_MODEL_INTENT
+    const rawMode = process.env.LLM_MODE
+    let intent: LLMModelIntent | undefined
+    let llmMode: 'development' | 'production' = 'production'
+
+    if (rawIntent === 'fast' || rawIntent === 'quality' || rawIntent === 'parity') {
+      intent = rawIntent
+    } else if (rawMode === 'development' || rawMode === 'production') {
+      console.warn(
+        '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
+          '"fast" | "quality" | "parity" instead.',
+      )
+      llmMode = rawMode
+    }
+
+    const generator = runFullAnalysisStream(
+      repoUrl,
+      githubToken,
+      anthropicApiKey,
+      llmMode,
+      intent,
+    )
     const encoder = new TextEncoder()
 
     const stream = new ReadableStream({

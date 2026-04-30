@@ -475,6 +475,14 @@ const MODELS = {
 
 export type LLMMode = keyof typeof MODELS
 
+export type LLMModelIntent = 'fast' | 'quality' | 'parity'
+
+export const INTENT_TO_MODEL: Record<LLMModelIntent, string> = {
+  fast: MODELS.development,
+  quality: MODELS.production,
+  parity: MODELS.production,
+}
+
 // ─── Streaming Events ─────────────────────────────────────────────────────────
 
 export type LLMStreamEvent =
@@ -928,9 +936,16 @@ export async function* analyzeWithLLMStream(
   repoContext: { owner: string; repo: string; branch: string },
   apiKey: string,
   mode: LLMMode = 'production',
+  intent?: LLMModelIntent,
 ): AsyncGenerator<LLMStreamEvent> {
   const client = new Anthropic({ apiKey })
-  const model = MODELS[mode]
+  const resolvedIntent: LLMModelIntent =
+    intent ?? (mode === 'development' ? 'fast' : 'quality')
+  const model = INTENT_TO_MODEL[resolvedIntent]
+  console.log(
+    `[LLM] using ${model} (intent: ${resolvedIntent}, ` +
+      `caller passed: ${intent !== undefined ? 'intent=' + intent : 'mode=' + mode})`,
+  )
 
   const llmStart = Date.now()
   const counters = { iter: 0, toolCalls: 0 }
@@ -1019,6 +1034,7 @@ export async function analyzeWithLLM(
   repoContext: { owner: string; repo: string; branch: string },
   apiKey: string,
   mode: LLMMode = 'production',
+  intent?: LLMModelIntent,
 ): Promise<LLMAnalysisResult> {
   for await (const event of analyzeWithLLMStream(
     discovery,
@@ -1026,6 +1042,7 @@ export async function analyzeWithLLM(
     repoContext,
     apiKey,
     mode,
+    intent,
   )) {
     if (event.type === 'result') return event.result
   }

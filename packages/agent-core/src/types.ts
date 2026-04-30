@@ -350,6 +350,12 @@ export type AnalysisStatus =
   | 'complete'
   | 'failed'
 
+export interface AnalysisMeta {
+  model: string
+  intent: 'fast' | 'quality' | 'parity'
+  deprecatedModeUsed: boolean
+}
+
 export interface FullAnalysisResult {
   id: string
   repoUrl: string
@@ -357,6 +363,7 @@ export interface FullAnalysisResult {
   discovery: DiscoveryResult | null
   llmAnalysis: LLMAnalysisResult | null
   error: string | null
+  meta: AnalysisMeta | null
   createdAt: string
   completedAt: string | null
 }
