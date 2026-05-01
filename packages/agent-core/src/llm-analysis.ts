@@ -1048,3 +1048,9 @@ export async function analyzeWithLLM(
   }
   throw new Error('analyzeWithLLM: stream ended without producing a result')
 }
+
+export const __internal = {
+  coerceCorePartial,
+  coerceGuidePartial,
+  filterTreeForPrompt,
+}
