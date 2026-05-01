@@ -2,10 +2,12 @@
 
 import { useState } from 'react'
 import type {
+  AnalysisMeta,
   ArchitecturePattern,
-  FullAnalysisResult,
-  LLMAnalysisResult,
   DiscoveryResult,
+  LLMAnalysisResult,
+  LLMCorePartial,
+  LLMGuidePartial,
   RepoType,
   RepoTypeResult,
 } from '@reponboard/agent-core'
@@ -13,9 +15,20 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Check, ChevronDown, ExternalLink } from 'lucide-react'
 import { QaChat } from './qa-chat'
+import { RepoHeaderSkeleton } from './skeletons/repo-header-skeleton'
+import { ExecutiveSummarySkeleton } from './skeletons/executive-summary-skeleton'
+import { StackSkeleton } from './skeletons/stack-skeleton'
+import { ArchitectureSkeleton } from './skeletons/architecture-skeleton'
+import { OnboardingJourneySkeleton } from './skeletons/onboarding-journey-skeleton'
+import { KeyFilesSkeleton } from './skeletons/key-files-skeleton'
+import { StatsSkeleton } from './skeletons/stats-skeleton'
 
 interface AnalysisResultProps {
-  result: FullAnalysisResult
+  core: LLMCorePartial | null
+  guide: LLMGuidePartial | null
+  discovery: DiscoveryResult | null
+  analysisMeta: { id: string; repoUrl: string; meta: AnalysisMeta | null } | null
+  complete: boolean
   onReset: () => void
 }
 
@@ -266,6 +279,9 @@ function ArchitectureSection({
         <div className="flex items-center gap-3">
           <span className="text-xl" aria-hidden="true">{icon}</span>
           <div className="flex flex-col items-start gap-0.5 min-w-0">
+            <span className="text-xs font-semibold text-zinc-500 uppercase tracking-widest">
+              Architecture Pattern
+            </span>
             <span className="text-sm font-semibold text-violet-300 capitalize">
               {insights.pattern}
             </span>
@@ -725,100 +741,151 @@ function DiscoveryEntryPointsSection({
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
-export function AnalysisResult({ result, onReset }: AnalysisResultProps): React.JSX.Element {
-  const { discovery, llmAnalysis } = result
-
-  if (discovery === null) {
-    return (
-      <div className="w-full flex flex-col gap-4">
-        <p className="text-sm text-red-400">Analysis failed: no discovery data available.</p>
-        <Button variant="secondary" onClick={onReset}>
-          Try again
-        </Button>
-      </div>
-    )
-  }
-
-  const { repoInfo, stack, repoType, keyFiles, entryPoints, totalFiles, totalDirectories } =
-    discovery
-  const isNonCode = repoType.type !== 'code'
+export function AnalysisResult({
+  core,
+  guide,
+  discovery,
+  analysisMeta,
+  complete,
+  onReset,
+}: AnalysisResultProps): React.JSX.Element {
+  const isHeuristicOnly = complete && core === null && discovery !== null
+  const isNonCode =
+    discovery !== null && discovery.repoType.type !== 'code'
 
   return (
     <div className="w-full flex flex-col gap-6">
       <div style={{ animationDelay: '0ms' }}>
-        <RepoHeader repoInfo={repoInfo} />
+        {discovery !== null ? (
+          <RepoHeader repoInfo={discovery.repoInfo} />
+        ) : (
+          <RepoHeaderSkeleton />
+        )}
       </div>
 
-      <RepoTypeAlert repoType={repoType} />
+      {discovery !== null && discovery.repoType.type !== 'code' && (
+        <RepoTypeAlert repoType={discovery.repoType} />
+      )}
 
-      {llmAnalysis !== null ? (
+      {isHeuristicOnly && discovery !== null ? (
         <>
           <div style={{ animationDelay: '100ms' }}>
-            <ExecutiveSummarySection summary={llmAnalysis.executiveSummary} />
+            <DiscoveryStackSection stack={discovery.stack} isNonCode={isNonCode} />
           </div>
           <div style={{ animationDelay: '200ms' }}>
-            <StackSection refinedStack={llmAnalysis.refinedStack} isNonCode={isNonCode} />
+            <DiscoveryKeyFilesSection keyFiles={discovery.keyFiles} />
           </div>
           <div style={{ animationDelay: '300ms' }}>
-            <ExplorationPathSection
-              steps={llmAnalysis.explorationPath}
-              repoFullName={repoInfo.fullName}
-              defaultBranch={repoInfo.defaultBranch}
-            />
+            <DiscoveryEntryPointsSection entryPoints={discovery.entryPoints} />
           </div>
-          <div style={{ animationDelay: '400ms' }}>
-            <ArchitectureSection insights={llmAnalysis.architectureInsights} />
-          </div>
-          <div style={{ animationDelay: '500ms' }}>
-            <LLMKeyFilesSection keyFiles={llmAnalysis.keyFiles} />
-          </div>
-
         </>
       ) : (
         <>
           <div style={{ animationDelay: '100ms' }}>
-            <DiscoveryStackSection stack={stack} isNonCode={isNonCode} />
+            {core !== null ? (
+              <ExecutiveSummarySection summary={core.executiveSummary} />
+            ) : (
+              <ExecutiveSummarySkeleton />
+            )}
           </div>
           <div style={{ animationDelay: '200ms' }}>
-            <DiscoveryKeyFilesSection keyFiles={keyFiles} />
+            {core !== null ? (
+              <StackSection refinedStack={core.refinedStack} isNonCode={isNonCode} />
+            ) : (
+              <StackSkeleton />
+            )}
           </div>
           <div style={{ animationDelay: '300ms' }}>
-            <DiscoveryEntryPointsSection entryPoints={entryPoints} />
+            {guide !== null && discovery !== null ? (
+              <ExplorationPathSection
+                steps={guide.explorationPath}
+                repoFullName={discovery.repoInfo.fullName}
+                defaultBranch={discovery.repoInfo.defaultBranch}
+              />
+            ) : (
+              <OnboardingJourneySkeleton />
+            )}
+          </div>
+          <div style={{ animationDelay: '400ms' }}>
+            {core !== null ? (
+              <ArchitectureSection insights={core.architectureInsights} />
+            ) : (
+              <ArchitectureSkeleton />
+            )}
+          </div>
+          <div style={{ animationDelay: '500ms' }}>
+            {guide !== null ? (
+              <LLMKeyFilesSection keyFiles={guide.keyFiles} />
+            ) : (
+              <KeyFilesSkeleton />
+            )}
           </div>
         </>
       )}
 
       {/* Stats */}
       <div style={{ animationDelay: '600ms' }}>
-        <Section title="Stats">
-          <div className="grid grid-cols-3 gap-4 text-center">
-            <div className="flex flex-col gap-1">
-              <span className="text-2xl font-bold text-zinc-100">
-                {totalFiles.toLocaleString()}
-              </span>
-              <span className="text-xs text-zinc-500">Files</span>
+        {discovery !== null ? (
+          <Section title="Stats">
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div className="flex flex-col gap-1">
+                <span className="text-2xl font-bold text-zinc-100">
+                  {discovery.totalFiles.toLocaleString()}
+                </span>
+                <span className="text-xs text-zinc-500">Files</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-2xl font-bold text-zinc-100">
+                  {discovery.totalDirectories.toLocaleString()}
+                </span>
+                <span className="text-xs text-zinc-500">Directories</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-2xl font-bold text-zinc-100">
+                  {Math.round(
+                    (core?.refinedStack.confidence ?? discovery.stack.confidence) * 100,
+                  )}
+                  %
+                </span>
+                <span className="text-xs text-zinc-500">Stack confidence</span>
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-2xl font-bold text-zinc-100">
-                {totalDirectories.toLocaleString()}
-              </span>
-              <span className="text-xs text-zinc-500">Directories</span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-2xl font-bold text-zinc-100">
-                {Math.round((llmAnalysis?.refinedStack?.confidence ?? stack.confidence) * 100)}%
-              </span>
-              <span className="text-xs text-zinc-500">Stack confidence</span>
-            </div>
-          </div>
-        </Section>
+          </Section>
+        ) : (
+          <StatsSkeleton />
+        )}
       </div>
 
       <Button variant="secondary" onClick={onReset}>
         Analyze another repo
       </Button>
 
-      {llmAnalysis !== null && <QaChat result={result} />}
+      {complete &&
+        core !== null &&
+        guide !== null &&
+        discovery !== null &&
+        analysisMeta !== null && (
+          <QaChat
+            result={{
+              id: analysisMeta.id,
+              repoUrl: analysisMeta.repoUrl,
+              status: 'complete',
+              discovery,
+              llmAnalysis: {
+                refinedStack: core.refinedStack,
+                executiveSummary: core.executiveSummary,
+                architectureInsights: core.architectureInsights,
+                keyFiles: guide.keyFiles,
+                explorationPath: guide.explorationPath,
+                codebaseContext: guide.codebaseContext,
+              },
+              meta: analysisMeta.meta,
+              error: null,
+              createdAt: '',
+              completedAt: '',
+            }}
+          />
+        )}
     </div>
   )
 }
