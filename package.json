@@ -5,6 +5,7 @@
   "description": "Onboard any codebase in 5 minutes — AI-powered onboarding agent",
   "author": "Allan Monterroso <allan.monterroso1@gmail.com>",
   "license": "MIT",
+  "packageManager": "pnpm@10.29.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/amonterroso/reponboard-ai.git"
