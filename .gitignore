@@ -41,3 +41,6 @@ pnpm-debug.log*
 # OMC runtime state
 .omc/
 .vercel
+
+# Benchmark output
+benchmark-results/*.jsonl

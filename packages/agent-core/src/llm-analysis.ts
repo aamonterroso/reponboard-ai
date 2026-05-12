@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
+import { calculateCost } from './pricing'
 import type {
+  AnalysisMeta,
   ArchitectureInsights,
   DetectedStack,
   DiscoveryResult,
@@ -479,7 +481,7 @@ export type LLMModelIntent = 'fast' | 'quality' | 'parity'
 
 export const INTENT_TO_MODEL: Record<LLMModelIntent, string> = {
   fast: MODELS.development,
-  quality: MODELS.production,
+  quality: 'claude-sonnet-4-6',
   parity: MODELS.production,
 }
 
@@ -492,8 +494,8 @@ export type LLMStreamEvent =
       toolCall?: string
       toolInput?: Record<string, unknown>
     }
-  | { type: 'partial_core'; core: LLMCorePartial }
-  | { type: 'partial_guide'; guide: LLMGuidePartial }
+  | { type: 'partial_core'; core: LLMCorePartial; meta: AnalysisMeta }
+  | { type: 'partial_guide'; guide: LLMGuidePartial; meta: AnalysisMeta }
   | { type: 'result'; result: LLMAnalysisResult }
 
 const MAX_TOOL_CALLS_CORE = 4
@@ -537,15 +539,20 @@ type ArchPattern = (typeof VALID_PATTERNS)[number]
 function coerceCorePartial(
   value: unknown,
   discoveryStack: DetectedStack,
+  coercedFields?: string[],
 ): LLMCorePartial {
   if (typeof value !== 'object' || value === null) {
     throw new Error('finish_core returned non-object')
   }
   const v = value as Record<string, unknown>
+  const track = (field: string): void => {
+    if (coercedFields !== undefined) coercedFields.push(field)
+  }
 
   let refinedStack: RefinedStack
   if (typeof v.refinedStack !== 'object' || v.refinedStack === null) {
     console.warn('[LLM] refinedStack missing, falling back to discovery stack')
+    track('refinedStack')
     refinedStack = {
       ...discoveryStack,
       reasoning:
@@ -553,6 +560,18 @@ function coerceCorePartial(
     }
   } else {
     const rs = v.refinedStack as Record<string, unknown>
+    if (rs.runtime === undefined) track('refinedStack.runtime')
+    if (rs.framework === undefined) track('refinedStack.framework')
+    if (rs.language === undefined) track('refinedStack.language')
+    if (rs.category === undefined) track('refinedStack.category')
+    if (rs.packageManager === undefined) track('refinedStack.packageManager')
+    if (typeof rs.hasTests !== 'boolean') track('refinedStack.hasTests')
+    if (typeof rs.hasDocker !== 'boolean') track('refinedStack.hasDocker')
+    if (typeof rs.hasCi !== 'boolean') track('refinedStack.hasCi')
+    if (!Array.isArray(rs.additionalLibraries))
+      track('refinedStack.additionalLibraries')
+    if (typeof rs.confidence !== 'number') track('refinedStack.confidence')
+    if (typeof rs.reasoning !== 'string') track('refinedStack.reasoning')
     refinedStack = {
       runtime: (rs.runtime as DetectedStack['runtime']) ?? discoveryStack.runtime,
       framework:
@@ -587,6 +606,7 @@ function coerceCorePartial(
   let executiveSummary: ExecutiveSummary
   if (typeof v.executiveSummary !== 'object' || v.executiveSummary === null) {
     console.warn('[LLM] executiveSummary missing, using minimal fallback')
+    track('executiveSummary')
     executiveSummary = {
       oneLiner: 'Analysis incomplete — LLM did not provide a summary.',
       overview:
@@ -595,6 +615,10 @@ function coerceCorePartial(
     }
   } else {
     const es = v.executiveSummary as Record<string, unknown>
+    if (typeof es.oneLiner !== 'string') track('executiveSummary.oneLiner')
+    if (typeof es.overview !== 'string') track('executiveSummary.overview')
+    if (typeof es.targetAudience !== 'string')
+      track('executiveSummary.targetAudience')
     executiveSummary = {
       oneLiner: typeof es.oneLiner === 'string' ? es.oneLiner : '',
       overview: typeof es.overview === 'string' ? es.overview : '',
@@ -609,6 +633,7 @@ function coerceCorePartial(
     v.architectureInsights === null
   ) {
     console.warn('[LLM] architectureInsights missing, using empty defaults')
+    track('architectureInsights')
     architectureInsights = {
       pattern: 'unknown',
       patternDescription: '',
@@ -627,7 +652,20 @@ function coerceCorePartial(
       console.warn(
         `[LLM] pattern "${ai.pattern}" not in enum, coerced to unknown`,
       )
+      track('architectureInsights.pattern')
+    } else {
+      track('architectureInsights.pattern')
     }
+    if (
+      typeof ai.patternDescription !== 'string' ||
+      ai.patternDescription.trim() === ''
+    ) {
+      track('architectureInsights.patternDescription')
+    }
+    if (!Array.isArray(ai.keyDirectories))
+      track('architectureInsights.keyDirectories')
+    if (!Array.isArray(ai.designDecisions))
+      track('architectureInsights.designDecisions')
     architectureInsights = {
       pattern,
       patternDescription:
@@ -647,15 +685,22 @@ function coerceCorePartial(
   return { refinedStack, executiveSummary, architectureInsights }
 }
 
-function coerceGuidePartial(value: unknown): LLMGuidePartial {
+function coerceGuidePartial(
+  value: unknown,
+  coercedFields?: string[],
+): LLMGuidePartial {
   if (typeof value !== 'object' || value === null) {
     throw new Error('finish_guide returned non-object')
   }
   const v = value as Record<string, unknown>
+  const track = (field: string): void => {
+    if (coercedFields !== undefined) coercedFields.push(field)
+  }
 
   let keyFiles: LLMKeyFile[]
   if (!Array.isArray(v.keyFiles)) {
     console.warn('[LLM] keyFiles missing, defaulting to []')
+    track('keyFiles')
     keyFiles = []
   } else {
     keyFiles = v.keyFiles as LLMKeyFile[]
@@ -664,11 +709,13 @@ function coerceGuidePartial(value: unknown): LLMGuidePartial {
   let explorationPath: ExplorationPathStep[]
   if (!Array.isArray(v.explorationPath)) {
     console.warn('[LLM] explorationPath missing, defaulting to []')
+    track('explorationPath')
     explorationPath = []
   } else {
     explorationPath = v.explorationPath as ExplorationPathStep[]
   }
 
+  if (typeof v.codebaseContext !== 'string') track('codebaseContext')
   const codebaseContext =
     typeof v.codebaseContext === 'string' ? v.codebaseContext : ''
 
@@ -785,15 +832,27 @@ interface PhaseContext {
   llmStart: number
 }
 
+export interface PhaseRunResult {
+  finishBlock: Anthropic.ToolUseBlock | null
+  latencyMs: number
+  tokensIn: number
+  tokensOut: number
+  toolCallCount: number
+}
+
 // Run a single ReAct phase. Yields thinking events as the agent works, and
 // returns the captured finish tool_use block (or null if the phase exhausted
 // its iteration budget without one). Mutates `ctx.messages` so the caller can
 // continue the conversation in the next phase.
 async function* runReactPhase(
   ctx: PhaseContext,
-): AsyncGenerator<LLMStreamEvent, Anthropic.ToolUseBlock | null> {
+): AsyncGenerator<LLMStreamEvent, PhaseRunResult> {
   const phaseMaxIterations = ctx.maxToolCalls + 3
   let phaseIter = 0
+  const phaseStart = Date.now()
+  let phaseTokensIn = 0
+  let phaseTokensOut = 0
+  let phaseToolCalls = 0
 
   while (phaseIter < phaseMaxIterations) {
     phaseIter++
@@ -827,12 +886,15 @@ async function* runReactPhase(
         : {}),
     })
     console.log(`[timing] anthropic api call took ${Date.now() - apiStart}ms`)
+    phaseTokensIn += response.usage.input_tokens
+    phaseTokensOut += response.usage.output_tokens
 
     const finishBlock = response.content.find(
       (b): b is Anthropic.ToolUseBlock =>
         b.type === 'tool_use' && b.name === ctx.finishToolName,
     )
     if (finishBlock !== undefined) {
+      phaseToolCalls++
       yield {
         type: 'thinking',
         message: 'Finalizing analysis...',
@@ -854,7 +916,13 @@ async function* runReactPhase(
                 : 'Skipped — proceeding to next phase.',
         }))
       ctx.messages.push({ role: 'user', content: finalResults })
-      return finishBlock
+      return {
+        finishBlock,
+        latencyMs: Date.now() - phaseStart,
+        tokensIn: phaseTokensIn,
+        tokensOut: phaseTokensOut,
+        toolCallCount: phaseToolCalls,
+      }
     }
 
     const toolUses = response.content.filter(
@@ -876,6 +944,7 @@ async function* runReactPhase(
 
     for (const toolUse of toolUses) {
       ctx.counters.toolCalls++
+      phaseToolCalls++
       const pathOrQuery =
         typeof toolUse.input === 'object' &&
         toolUse.input !== null &&
@@ -927,7 +996,13 @@ async function* runReactPhase(
     ctx.messages.push({ role: 'user', content: toolResults })
   }
 
-  return null
+  return {
+    finishBlock: null,
+    latencyMs: Date.now() - phaseStart,
+    tokensIn: phaseTokensIn,
+    tokensOut: phaseTokensOut,
+    toolCallCount: phaseToolCalls,
+  }
 }
 
 export async function* analyzeWithLLMStream(
@@ -968,10 +1043,12 @@ export async function* analyzeWithLLMStream(
     { role: 'user', content: initialUser },
   ]
 
+  const deprecatedModeUsed = intent === undefined
+
   // ─── PHASE 1: Core (refinedStack + executiveSummary + architectureInsights) ──
   console.log('[timing] phase 1 (core) start')
   const phase1Start = Date.now()
-  const coreBlock = yield* runReactPhase({
+  const coreRun = yield* runReactPhase({
     client,
     model,
     messages,
@@ -985,18 +1062,36 @@ export async function* analyzeWithLLMStream(
     llmStart,
   })
   console.log(`[timing] phase 1 done in ${Date.now() - phase1Start}ms`)
-  if (coreBlock === null) {
+  if (coreRun.finishBlock === null) {
     throw new Error(
       'Phase 1 (core) exhausted iterations without producing finish_core',
     )
   }
-  const corePartial = coerceCorePartial(coreBlock.input, discovery.stack)
-  yield { type: 'partial_core', core: corePartial }
+  const coreCoerced: string[] = []
+  const corePartial = coerceCorePartial(
+    coreRun.finishBlock.input,
+    discovery.stack,
+    coreCoerced,
+  )
+  const coreMeta: AnalysisMeta = {
+    model,
+    intent: resolvedIntent,
+    deprecatedModeUsed,
+    phase: 'core',
+    latencyMs: coreRun.latencyMs,
+    tokensIn: coreRun.tokensIn,
+    tokensOut: coreRun.tokensOut,
+    costUsd: calculateCost(model, coreRun.tokensIn, coreRun.tokensOut),
+    toolCallCount: coreRun.toolCallCount,
+    truncated: coreCoerced.length > 0,
+    coercedFields: coreCoerced,
+  }
+  yield { type: 'partial_core', core: corePartial, meta: coreMeta }
 
   // ─── PHASE 2: Guide (keyFiles + explorationPath + codebaseContext) ───────────
   console.log('[timing] phase 2 (guide) start')
   const phase2Start = Date.now()
-  const guideBlock = yield* runReactPhase({
+  const guideRun = yield* runReactPhase({
     client,
     model,
     messages,
@@ -1010,13 +1105,27 @@ export async function* analyzeWithLLMStream(
     llmStart,
   })
   console.log(`[timing] phase 2 done in ${Date.now() - phase2Start}ms`)
-  if (guideBlock === null) {
+  if (guideRun.finishBlock === null) {
     throw new Error(
       'Phase 2 (guide) exhausted iterations without producing finish_guide',
     )
   }
-  const guidePartial = coerceGuidePartial(guideBlock.input)
-  yield { type: 'partial_guide', guide: guidePartial }
+  const guideCoerced: string[] = []
+  const guidePartial = coerceGuidePartial(guideRun.finishBlock.input, guideCoerced)
+  const guideMeta: AnalysisMeta = {
+    model,
+    intent: resolvedIntent,
+    deprecatedModeUsed,
+    phase: 'guide',
+    latencyMs: guideRun.latencyMs,
+    tokensIn: guideRun.tokensIn,
+    tokensOut: guideRun.tokensOut,
+    costUsd: calculateCost(model, guideRun.tokensIn, guideRun.tokensOut),
+    toolCallCount: guideRun.toolCallCount,
+    truncated: guideCoerced.length > 0,
+    coercedFields: guideCoerced,
+  }
+  yield { type: 'partial_guide', guide: guidePartial, meta: guideMeta }
 
   const merged = mergePartials(corePartial, guidePartial)
   const normalized = normalizeLLMAnalysisResult(merged)
@@ -1028,6 +1137,12 @@ export async function* analyzeWithLLMStream(
 
 // ─── Non-streaming Convenience Wrapper ────────────────────────────────────────
 
+export interface LLMAnalysisRun {
+  result: LLMAnalysisResult
+  coreMeta: AnalysisMeta | null
+  guideMeta: AnalysisMeta | null
+}
+
 export async function analyzeWithLLM(
   discovery: DiscoveryResult,
   githubClient: GitHubClient,
@@ -1035,7 +1150,9 @@ export async function analyzeWithLLM(
   apiKey: string,
   mode: LLMMode = 'production',
   intent?: LLMModelIntent,
-): Promise<LLMAnalysisResult> {
+): Promise<LLMAnalysisRun> {
+  let coreMeta: AnalysisMeta | null = null
+  let guideMeta: AnalysisMeta | null = null
   for await (const event of analyzeWithLLMStream(
     discovery,
     githubClient,
@@ -1044,7 +1161,13 @@ export async function analyzeWithLLM(
     mode,
     intent,
   )) {
-    if (event.type === 'result') return event.result
+    if (event.type === 'partial_core') {
+      coreMeta = event.meta
+    } else if (event.type === 'partial_guide') {
+      guideMeta = event.meta
+    } else if (event.type === 'result') {
+      return { result: event.result, coreMeta, guideMeta }
+    }
   }
   throw new Error('analyzeWithLLM: stream ended without producing a result')
 }

@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import type {
-  AnalysisMeta,
+  AnalysisMetaByPhase,
   ArchitecturePattern,
   DiscoveryResult,
   LLMAnalysisResult,
@@ -27,7 +27,7 @@ interface AnalysisResultProps {
   core: LLMCorePartial | null
   guide: LLMGuidePartial | null
   discovery: DiscoveryResult | null
-  analysisMeta: { id: string; repoUrl: string; meta: AnalysisMeta | null } | null
+  analysisMeta: { id: string; repoUrl: string; meta: AnalysisMetaByPhase | null } | null
   complete: boolean
   onReset: () => void
 }
