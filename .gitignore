@@ -42,5 +42,10 @@ pnpm-debug.log*
 .omc/
 .vercel
 
-# Benchmark output
+# Benchmark output — only the canonical dataset is tracked
 benchmark-results/*.jsonl
+benchmark-results/sanity-test/
+benchmark-results/validation-pre-block-g/
+benchmark-results/q4-contaminated-attempt1/
+!benchmark-results/block-g-final-canonical/
+!benchmark-results/block-g-final-canonical/**
