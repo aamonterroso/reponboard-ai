@@ -354,6 +354,19 @@ export interface AnalysisMeta {
   model: string
   intent: 'fast' | 'quality' | 'parity'
   deprecatedModeUsed: boolean
+  phase: 'core' | 'guide'
+  latencyMs: number
+  tokensIn: number
+  tokensOut: number
+  costUsd: number
+  toolCallCount: number
+  truncated: boolean
+  coercedFields: string[]
+}
+
+export interface AnalysisMetaByPhase {
+  core: AnalysisMeta | null
+  guide: AnalysisMeta | null
 }
 
 export interface FullAnalysisResult {
@@ -363,7 +376,7 @@ export interface FullAnalysisResult {
   discovery: DiscoveryResult | null
   llmAnalysis: LLMAnalysisResult | null
   error: string | null
-  meta: AnalysisMeta | null
+  meta: AnalysisMetaByPhase | null
   createdAt: string
   completedAt: string | null
 }

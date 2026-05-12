@@ -28,10 +28,18 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "clean": "pnpm -r clean && rm -rf node_modules"
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "bench": "tsx --env-file=.env.local scripts/benchmark.ts",
+    "bench:summary": "tsx scripts/benchmark-summary.ts"
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "@reponboard/agent-core": "workspace:*",
+    "@types/minimist": "^1.2.5",
+    "minimist": "^1.2.8",
+    "tsx": "^4.21.0"
   }
 }

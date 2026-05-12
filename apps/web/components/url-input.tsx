@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import type {
-  AnalysisMeta,
+  AnalysisMetaByPhase,
   AnalysisPhase,
   DiscoveryResult,
   FullAnalysisResult,
@@ -30,7 +30,7 @@ export function UrlInput(): React.JSX.Element {
   const [analysisMeta, setAnalysisMeta] = useState<{
     id: string
     repoUrl: string
-    meta: AnalysisMeta | null
+    meta: AnalysisMetaByPhase | null
   } | null>(null)
   const [complete, setComplete] = useState(false)
   const [seenPhases, setSeenPhases] = useState<Set<AnalysisPhase>>(new Set())

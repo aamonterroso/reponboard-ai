@@ -3,11 +3,10 @@ import { runDiscovery } from './discovery'
 import {
   analyzeWithLLM,
   analyzeWithLLMStream,
-  INTENT_TO_MODEL,
 } from './llm-analysis'
 import type { LLMMode, LLMModelIntent } from './llm-analysis'
 import type {
-  AnalysisMeta,
+  AnalysisMetaByPhase,
   AnalysisProgressEvent,
   FullAnalysisResult,
   LLMAnalysisResult,
@@ -25,16 +24,6 @@ export async function runFullAnalysis(
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
 
-  const resolvedIntent: LLMModelIntent =
-    intent ?? (llmMode === 'development' ? 'fast' : 'quality')
-  const model = INTENT_TO_MODEL[resolvedIntent]
-  const deprecatedModeUsed = intent === undefined
-  const meta: AnalysisMeta = {
-    model,
-    intent: resolvedIntent,
-    deprecatedModeUsed,
-  }
-
   // Layer 1: heuristic discovery
   const discovery = await runDiscovery(repoUrl, githubToken)
 
@@ -45,9 +34,10 @@ export async function runFullAnalysis(
   // Layer 2: LLM analysis with tool_use — degrades gracefully if it fails
   let llmAnalysis: FullAnalysisResult['llmAnalysis'] = null
   let error: string | null = null
+  const meta: AnalysisMetaByPhase = { core: null, guide: null }
 
   try {
-    llmAnalysis = await analyzeWithLLM(
+    const run = await analyzeWithLLM(
       discovery,
       client,
       { owner, repo, branch: resolvedBranch },
@@ -55,6 +45,9 @@ export async function runFullAnalysis(
       llmMode,
       intent,
     )
+    llmAnalysis = run.result
+    meta.core = run.coreMeta
+    meta.guide = run.guideMeta
   } catch (err) {
     console.error('[analyzeWithLLM] Error:', err)
     error = err instanceof Error ? err.message : String(err)
@@ -86,16 +79,7 @@ export async function* runFullAnalysisStream(
   console.log('[timing] analysis start')
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
-
-  const resolvedIntent: LLMModelIntent =
-    intent ?? (llmMode === 'development' ? 'fast' : 'quality')
-  const model = INTENT_TO_MODEL[resolvedIntent]
-  const deprecatedModeUsed = intent === undefined
-  const meta: AnalysisMeta = {
-    model,
-    intent: resolvedIntent,
-    deprecatedModeUsed,
-  }
+  const meta: AnalysisMetaByPhase = { core: null, guide: null }
 
   try {
     yield { phase: 'discovery', message: 'Scanning repository structure...' }
@@ -134,8 +118,10 @@ export async function* runFullAnalysisStream(
           if (event.toolInput !== undefined) base.toolInput = event.toolInput
           yield base
         } else if (event.type === 'partial_core') {
+          meta.core = event.meta
           yield { phase: 'partial_core', core: event.core }
         } else if (event.type === 'partial_guide') {
+          meta.guide = event.meta
           yield { phase: 'partial_guide', guide: event.guide }
         } else {
           llmAnalysis = event.result
