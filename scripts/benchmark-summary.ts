@@ -10,7 +10,7 @@ interface CliArgs {
 function parseArgs(): CliArgs {
   const argv = minimist(process.argv.slice(2), {
     string: ['input'],
-    default: { input: 'benchmark-results' },
+    default: { input: 'benchmark-results/block-g-final-canonical' },
   })
   return { input: String(argv.input) }
 }
@@ -84,7 +84,9 @@ function repoSlug(url: string): string {
 function main(): void {
   const args = parseArgs()
   const dir = resolve(args.input)
-  const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+  const files = readdirSync(dir, { recursive: true })
+    .map((entry) => (typeof entry === 'string' ? entry : entry.toString()))
+    .filter((f) => f.endsWith('.jsonl'))
   if (files.length === 0) {
     console.error(`[SUMMARY] no .jsonl files found in ${dir}`)
     process.exit(1)

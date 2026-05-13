@@ -146,6 +146,9 @@ export function UrlInput(): React.JSX.Element {
                   meta: event.result.meta ?? null,
                 })
                 setComplete(true)
+                window.dispatchEvent(
+                  new CustomEvent('reponboard:remaining-changed'),
+                )
                 if (event.result.llmAnalysis !== null) {
                   setCore({
                     refinedStack: event.result.llmAnalysis.refinedStack,
@@ -181,6 +184,9 @@ export function UrlInput(): React.JSX.Element {
           meta: fallback.meta ?? null,
         })
         setComplete(true)
+        window.dispatchEvent(
+          new CustomEvent('reponboard:remaining-changed'),
+        )
         if (fallback.llmAnalysis !== null) {
           setCore({
             refinedStack: fallback.llmAnalysis.refinedStack,

@@ -3,7 +3,11 @@ export const runtime = 'edge'
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
 import type { LLMModelIntent } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
-import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
+import {
+  checkRateLimit,
+  recordAnalysisCost,
+  recordRequestStart,
+} from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
 // Code-level cap on the analysis. Verified empirically that
@@ -15,8 +19,8 @@ const TIMEOUT_MS = 120_000
 
 function getClientIp(request: Request): string {
   return (
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    request.headers.get('x-real-ip') ??
+    request.headers.get('x-real-ip')?.split(',')[0]?.trim() ??
+    request.headers.get('x-forwarded-for') ??
     '127.0.0.1'
   )
 }
@@ -66,16 +70,25 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  // Rate limit CHECK only — increment happens after a successful 'complete'
-  // event so failed/timed-out analyses don't consume the user's daily quota.
+  // Rate limit: check up-front against the shared Redis state; increment
+  // the request counter before the analysis runs so the slot is reserved
+  // even if the stream is aborted. Cost is added to the budget key only
+  // after a successful 'complete' event.
   const ip = getClientIp(request)
-  const rateLimit = checkRateLimit(ip)
+  const rateLimit = await checkRateLimit(ip, 'analyze')
   if (!rateLimit.allowed) {
+    const message =
+      rateLimit.reason === 'budget_exceeded'
+        ? 'Demo budget exhausted for today. Try again tomorrow or run locally with your own API key.'
+        : rateLimit.reason === 'global_limit'
+          ? 'Demo daily limit reached. Try again tomorrow or run locally.'
+          : "You've used your daily allowance. Try again tomorrow or run locally."
     return NextResponse.json(
-      { error: 'Demo limit reached for today. Check back tomorrow.' },
+      { error: message, reason: rateLimit.reason },
       { status: 429 },
     )
   }
+  await recordRequestStart(ip, 'analyze')
 
   let repoUrl: string
   try {
@@ -148,10 +161,18 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         try {
           for await (const event of generator) {
             if (closed) break
-            // Charge the user's daily quota only when the analysis actually
-            // produces a result. Errors and the timeout path skip this.
+            // Charge the shared budget cap only on successful completion.
+            // Errors and the timeout path skip this so they don't dilute
+            // the cost-per-success accounting on the budget key.
             if (event.phase === 'complete') {
-              incrementRateLimit(ip)
+              const coreCost = event.result.meta?.core?.costUsd ?? 0
+              const guideCost = event.result.meta?.guide?.costUsd ?? 0
+              const costUsd = coreCost + guideCost
+              if (costUsd > 0) {
+                void recordAnalysisCost(costUsd).catch((err) => {
+                  console.warn('[rate-limit] recordAnalysisCost failed', err)
+                })
+              }
             }
             if (event.phase === 'complete' || event.phase === 'error') {
               console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
@@ -172,7 +193,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       headers: {
         'Content-Type': 'application/x-ndjson',
         'Cache-Control': 'no-cache',
-        'X-RateLimit-Remaining': String(rateLimit.globalRemaining),
+        'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
       },
     })
   }

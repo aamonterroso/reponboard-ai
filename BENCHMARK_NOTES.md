@@ -28,7 +28,15 @@ provenance, the things that went wrong, and what's safe to publish.
 
 - **Cost ratio tracks pricing exactly.** Sonnet ≈ 3× Haiku per analysis,
   matching the $3/$1 input price tier.
-- **Latency ratio ≈ 1.5–1.8× Sonnet vs Haiku** on clean runs.
+- **Latency ratio per repo: ~1.63× on zod, ~2.12× on flask** (Sonnet p50 /
+  Haiku p50, computed from the canonical JSONLs by `pnpm bench:summary`).
+  Counter-intuitively, the *smaller* workload has the *wider* gap: flask
+  finishes faster in absolute terms on Haiku (31.8s vs zod's 46.8s), but the
+  Sonnet/Haiku spread widens because the per-call reasoning overhead is
+  closer to fixed cost than to per-token cost — when the absolute latency
+  shrinks, the fixed reasoning tax dominates the ratio. Either way, both
+  numbers are far below Anthropic's published 4–5× throughput delta; agent
+  loops live in reasoning, not raw tokens-per-second.
 - **Truncation is intent-driven, not repo-driven.** Sonnet hit defensive
   coercion (`truncated: true`) on 40% of runs across *both* repos; Haiku on
   20%. Counter-intuitive — Sonnet needed more forced-finish calls because it
