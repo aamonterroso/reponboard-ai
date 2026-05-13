@@ -390,7 +390,9 @@ function LLMKeyFilesSection({ keyFiles }: { keyFiles: LLMAnalysisResult['keyFile
                 <div key={file.path} className="px-5 py-3 flex flex-col gap-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-mono text-zinc-100">{file.path}</span>
-                    <Badge label={file.category} variant="amber" />
+                    {file.category !== undefined && (
+                      <Badge label={file.category} variant="amber" />
+                    )}
                   </div>
                   <p className="text-xs text-zinc-400 leading-relaxed">{file.whatItDoes}</p>
                   <p className="text-xs text-emerald-600/80 leading-relaxed">{file.whyImportant}</p>

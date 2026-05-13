@@ -7,6 +7,7 @@ import {
   type LLMMode,
   type LLMModelIntent,
 } from './llm-analysis'
+import { calculateCost } from './pricing'
 import type {
   GitHubTreeNode,
   QAMessage,
@@ -158,6 +159,8 @@ export async function* answerQuestion(
 
     let toolCallCount = 0
     let iteration = 0
+    let tokensIn = 0
+    let tokensOut = 0
 
     while (iteration < MAX_ITERATIONS) {
       iteration++
@@ -169,6 +172,9 @@ export async function* answerQuestion(
         tools: QA_TOOLS,
         messages,
       })
+
+      tokensIn += response.usage.input_tokens
+      tokensOut += response.usage.output_tokens
 
       // respond is the terminal tool
       const respondBlock = response.content.find(
@@ -190,6 +196,7 @@ export async function* answerQuestion(
           // Dedupe in case the LLM repeats file paths — avoids React
           // duplicate-key warnings in the chat UI.
           filesReferenced: Array.from(new Set(rawFiles)),
+          costUsd: calculateCost(model, tokensIn, tokensOut),
         }
         yield { phase: 'complete', result }
         return
@@ -263,13 +270,15 @@ export async function* answerQuestion(
 
     // Safety fallback: agent never called respond() within the iteration cap.
     // Emit a graceful complete event so the UI shows a message rather than
-    // surfacing a raw error to the user.
+    // surfacing a raw error to the user. Still report the cost so the
+    // shared daily budget cap reflects what was actually spent.
     yield {
       phase: 'complete',
       result: {
         answer:
-          'I explored the codebase but ran out of tool calls to answer fully. Try rephrasing your question.',
+          'I started exploring but didn\'t find what I needed in time.  Could you point me to a specific area of the codebase?',
         filesReferenced: [],
+        costUsd: calculateCost(model, tokensIn, tokensOut),
       },
     }
   } catch (err) {

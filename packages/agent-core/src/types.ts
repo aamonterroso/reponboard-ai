@@ -252,6 +252,10 @@ export interface QAContext {
 export interface QAResult {
   answer: string
   filesReferenced: string[]
+  // USD cost of this Q&A turn, summed across every Anthropic call in
+  // the ReAct loop. Used by /api/qa to charge the shared daily budget
+  // cap. Optional — the safety-fallback complete event omits it.
+  costUsd?: number
 }
 
 export type QAProgressEvent =
@@ -308,7 +312,10 @@ export interface LLMKeyFile {
   path: string
   whatItDoes: string
   whyImportant: string
-  category: LLMKeyFileCategory
+  // Optional because the LLM sometimes emits an empty string or an
+  // unrecognized value; defensive coercion in llm-analysis.ts drops
+  // invalid values so the UI doesn't render an empty Badge.
+  category?: LLMKeyFileCategory
 }
 
 export interface ExplorationPathStep {

@@ -8,7 +8,11 @@ import {
   type LLMModelIntent,
   type QAMessage,
 } from '@reponboard/agent-core'
-import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit'
+import {
+  checkRateLimit,
+  recordAnalysisCost,
+  recordRequestStart,
+} from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
 // Code-level cap on the analysis. Verified empirically that
@@ -22,8 +26,8 @@ const MAX_HISTORY_ITEMS = 20
 
 function getClientIp(request: Request): string {
   return (
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    request.headers.get('x-real-ip') ??
+    request.headers.get('x-real-ip')?.split(',')[0]?.trim() ??
+    request.headers.get('x-forwarded-for') ??
     '127.0.0.1'
   )
 }
@@ -121,17 +125,24 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  // Rate limit CHECK only — increment happens after the Q&A successfully
-  // emits a 'complete' event so failed/timed-out questions don't consume
-  // the user's daily quota. Shared daily counter with /api/analyze.
+  // Rate limit: Redis-backed Q&A scope. Counter increments up-front so
+  // the slot is reserved even on stream abort; the shared daily budget
+  // cap is charged only after a successful 'complete' event.
   const ip = getClientIp(request)
-  const rateLimit = checkRateLimit(ip)
+  const rateLimit = await checkRateLimit(ip, 'qa')
   if (!rateLimit.allowed) {
+    const message =
+      rateLimit.reason === 'budget_exceeded'
+        ? 'Demo budget exhausted for today. Try again tomorrow or run locally.'
+        : rateLimit.reason === 'global_limit'
+          ? 'Q&A daily limit reached. Try again tomorrow or run locally.'
+          : "You've used your Q&A allowance for today. Try again tomorrow or run locally."
     return NextResponse.json(
-      { error: 'Demo limit reached for today. Check back tomorrow.' },
+      { error: message, reason: rateLimit.reason },
       { status: 429 },
     )
   }
+  await recordRequestStart(ip, 'qa')
 
   let owner: string
   let repo: string
@@ -232,10 +243,15 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       try {
         for await (const event of generator) {
           if (closed) break
-          // Charge the daily quota only when the Q&A actually produces a
-          // result. Errors and the timeout path skip this.
+          // Charge the shared daily budget only on successful completion.
+          // Errors and the timeout path skip this.
           if (event.phase === 'complete') {
-            incrementRateLimit(ip)
+            const costUsd = event.result.costUsd ?? 0
+            if (costUsd > 0) {
+              void recordAnalysisCost(costUsd).catch((err) => {
+                console.warn('[rate-limit] recordAnalysisCost failed', err)
+              })
+            }
           }
           controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
         }
@@ -252,7 +268,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     headers: {
       'Content-Type': 'application/x-ndjson',
       'Cache-Control': 'no-cache',
-      'X-RateLimit-Remaining': String(rateLimit.globalRemaining),
+      'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
     },
   })
 }

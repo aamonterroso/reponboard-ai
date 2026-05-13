@@ -1,5 +1,6 @@
 import { UrlInput } from '@/components/url-input'
 import { RandomTagline } from '@/components/random-tagline'
+import { DemoBanner } from '@/components/demo-banner'
 
 export default function HomePage(): React.JSX.Element {
   // NEXT_PUBLIC_IS_DEMO controls the rate-limit banner. Set to 'true' on the
@@ -8,13 +9,7 @@ export default function HomePage(): React.JSX.Element {
 
   return (
     <div className="min-h-screen bg-zinc-950 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(16,185,129,0.06),transparent)] text-zinc-100 flex flex-col">
-      {isDemo && (
-        <div className="w-full bg-zinc-900/80 border-b border-zinc-800 text-center py-2 px-4">
-          <p className="text-sm text-zinc-400">
-            ⚡ Demo — limited to 5 analyses/day to keep it free
-          </p>
-        </div>
-      )}
+      {isDemo && <DemoBanner />}
 
       <main className="flex-1 flex flex-col items-center justify-center px-4 pt-8">
         <div className="w-full max-w-3xl flex flex-col items-center gap-6">

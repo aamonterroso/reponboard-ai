@@ -13,8 +13,20 @@ import type {
   LLMCorePartial,
   LLMGuidePartial,
   LLMKeyFile,
+  LLMKeyFileCategory,
   RefinedStack,
 } from './types'
+
+const VALID_KEY_FILE_CATEGORIES: ReadonlySet<LLMKeyFileCategory> = new Set([
+  'entry-point',
+  'core-logic',
+  'configuration',
+  'infrastructure',
+  'data-model',
+  'utilities',
+  'tests',
+  'documentation',
+])
 
 // ─── Tree Filtering ───────────────────────────────────────────────────────────
 
@@ -703,7 +715,36 @@ function coerceGuidePartial(
     track('keyFiles')
     keyFiles = []
   } else {
-    keyFiles = v.keyFiles as LLMKeyFile[]
+    // Normalize each entry's `category` against the LLMKeyFileCategory enum.
+    // The LLM occasionally emits '' or an unrecognized value; downstream
+    // render code uses this field for a label-only Badge, so an invalid
+    // value would surface as an empty pill. Coerce to undefined (typed as
+    // optional below via a structural cast) so the render path can skip it.
+    keyFiles = v.keyFiles
+      .filter(
+        (entry): entry is Record<string, unknown> =>
+          typeof entry === 'object' && entry !== null,
+      )
+      .map((entry, idx) => {
+        const rawCategory = entry.category
+        const category =
+          typeof rawCategory === 'string' &&
+          VALID_KEY_FILE_CATEGORIES.has(rawCategory as LLMKeyFileCategory)
+            ? (rawCategory as LLMKeyFileCategory)
+            : undefined
+        if (category === undefined && rawCategory !== undefined) {
+          track(`keyFiles[${idx}].category`)
+        }
+        return {
+          path: typeof entry.path === 'string' ? entry.path : '',
+          whatItDoes:
+            typeof entry.whatItDoes === 'string' ? entry.whatItDoes : '',
+          whyImportant:
+            typeof entry.whyImportant === 'string' ? entry.whyImportant : '',
+          category,
+        } as LLMKeyFile
+      })
+      .filter((entry) => entry.path !== '')
   }
 
   let explorationPath: ExplorationPathStep[]
