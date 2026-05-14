@@ -1,5 +1,24 @@
 import { Redis } from '@upstash/redis'
 
+// Env-scoped key prefix isolates dev/preview/prod traffic that shares
+// the same Upstash database. Computed once at module load.
+function resolveKeyPrefix(): string {
+  const vercelEnv = process.env.VERCEL_ENV
+  if (vercelEnv === 'production') return 'prod'
+  if (vercelEnv === 'preview') return 'preview'
+  if (vercelEnv === 'development') return 'dev'
+  if (process.env.NODE_ENV === 'production') return 'prod'
+  return 'dev'
+}
+
+const KEY_PREFIX = resolveKeyPrefix()
+
+function prefixKey(key: string): string {
+  return `${KEY_PREFIX}:${key}`
+}
+
+console.log('[rate-limit] Key prefix:', KEY_PREFIX)
+
 // Vercel's Upstash Marketplace integration auto-injects its credentials
 // under the unusual UPSTASH_REDIS_REST_KV_REST_API_* prefix — the Vercel
 // envelope (UPSTASH_REDIS_REST_) wrapped around Upstash's internal
@@ -73,9 +92,9 @@ function keysFor(
 ): { global: string; ip: string; budget: string } {
   const day = todayUtc()
   return {
-    global: `ratelimit:${scope}:global:${day}`,
-    ip: `ratelimit:${scope}:ip:${ip}:${day}`,
-    budget: `ratelimit:budget:${day}`,
+    global: prefixKey(`ratelimit:${scope}:global:${day}`),
+    ip: prefixKey(`ratelimit:${scope}:ip:${ip}:${day}`),
+    budget: prefixKey(`ratelimit:budget:${day}`),
   }
 }
 
@@ -223,17 +242,17 @@ export async function __resetRateLimitForTesting(options?: {
   const keys: string[] = []
 
   if (options?.scope !== undefined) {
-    keys.push(`ratelimit:${options.scope}:global:${day}`)
+    keys.push(prefixKey(`ratelimit:${options.scope}:global:${day}`))
     if (options.ip !== undefined) {
-      keys.push(`ratelimit:${options.scope}:ip:${options.ip}:${day}`)
+      keys.push(prefixKey(`ratelimit:${options.scope}:ip:${options.ip}:${day}`))
     }
   } else {
-    keys.push(`ratelimit:analyze:global:${day}`)
-    keys.push(`ratelimit:qa:global:${day}`)
+    keys.push(prefixKey(`ratelimit:analyze:global:${day}`))
+    keys.push(prefixKey(`ratelimit:qa:global:${day}`))
   }
 
   if (options?.includeBudget === true) {
-    keys.push(`ratelimit:budget:${day}`)
+    keys.push(prefixKey(`ratelimit:budget:${day}`))
   }
 
   if (keys.length > 0) {
