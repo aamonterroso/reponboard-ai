@@ -7,6 +7,43 @@ import type {
   QAResult,
 } from '@reponboard/agent-core'
 import { Button } from '@/components/ui/button'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
+import go from 'react-syntax-highlighter/dist/esm/languages/prism/go'
+import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust'
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json'
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
+import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
+
+SyntaxHighlighter.registerLanguage('typescript', typescript)
+SyntaxHighlighter.registerLanguage('javascript', javascript)
+SyntaxHighlighter.registerLanguage('tsx', tsx)
+SyntaxHighlighter.registerLanguage('jsx', jsx)
+SyntaxHighlighter.registerLanguage('python', python)
+SyntaxHighlighter.registerLanguage('py', python)
+SyntaxHighlighter.registerLanguage('go', go)
+SyntaxHighlighter.registerLanguage('rust', rust)
+SyntaxHighlighter.registerLanguage('rs', rust)
+SyntaxHighlighter.registerLanguage('json', json)
+SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('sh', bash)
+SyntaxHighlighter.registerLanguage('yaml', yaml)
+SyntaxHighlighter.registerLanguage('yml', yaml)
+
+type LocalQaMessage = QAMessage & {
+  classification?: 'on_topic' | 'off_topic' | 'needs_clarification'
+  suggestions?: string[]
+  isError?: boolean
+  errorCode?: 'UPSTREAM_OVERLOADED' | 'UPSTREAM_UNAVAILABLE' | 'INTERNAL_ERROR'
+  requestId?: string
+}
 
 interface QaChatProps {
   result: FullAnalysisResult
@@ -40,6 +77,13 @@ function buildGitHubFileUrl(
   return `https://github.com/${owner}/${repo}/blob/${branch}/${path}`
 }
 
+const FILE_PATH_EXT_RE =
+  /\.(tsx?|jsx?|py|go|rs|md|json|ya?ml)$/i
+
+function looksLikeFilePath(text: string): boolean {
+  return text.includes('/') && FILE_PATH_EXT_RE.test(text)
+}
+
 export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
   const codebaseContext = result.llmAnalysis?.codebaseContext
   const repoUrl = result.repoUrl
@@ -48,7 +92,7 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
   const branch = result.discovery?.repoInfo.defaultBranch ?? 'main'
 
   const [open, setOpen] = useState(false)
-  const [messages, setMessages] = useState<QAMessage[]>([])
+  const [messages, setMessages] = useState<LocalQaMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [activity, setActivity] = useState<ToolActivity | null>(null)
@@ -85,7 +129,7 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
   const sendQuestion = useCallback(
     async (question: string): Promise<void> => {
       if (codebaseContext === undefined) return
-      const userMessage: QAMessage = {
+      const userMessage: LocalQaMessage = {
         role: 'user',
         content: question,
         filesReferenced: [],
@@ -125,7 +169,14 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-        let finalResult: QAResult | null = null
+        let finalResult: {
+          answer: string
+          filesReferenced: string[]
+          costUsd?: number
+          classification?: 'on_topic' | 'off_topic' | 'needs_clarification'
+          suggestions?: string[]
+          meta?: { classifierConfidence?: number; classifierDegradedMode?: boolean }
+        } | null = null
 
         while (true) {
           const { done, value } = await reader.read()
@@ -147,6 +198,8 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
                 summary?: string
                 result?: QAResult
                 error?: string
+                errorCode?: string
+                requestId?: string
               }
               if (event.phase === 'thinking') {
                 const inp = event.toolInput ?? {}
@@ -165,12 +218,38 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
                 event.phase === 'complete' &&
                 event.result !== undefined
               ) {
-                finalResult = event.result
+                const evt = event as {
+                  phase: string
+                  result?: {
+                    answer: string
+                    filesReferenced: string[]
+                    costUsd?: number
+                    classification?: 'on_topic' | 'off_topic' | 'needs_clarification'
+                    suggestions?: string[]
+                    meta?: { classifierConfidence?: number; classifierDegradedMode?: boolean }
+                  }
+                }
+                finalResult = evt.result ?? null
               } else if (
                 event.phase === 'error' &&
                 event.error !== undefined
               ) {
-                setError(event.error)
+                const errorMessage: LocalQaMessage = {
+                  role: 'assistant',
+                  content: '',
+                  filesReferenced: [],
+                  timestamp: nowIso(),
+                  isError: true,
+                  ...(event.errorCode !== undefined && {
+                    errorCode: event.errorCode as NonNullable<LocalQaMessage['errorCode']>,
+                  }),
+                  ...(event.requestId !== undefined && {
+                    requestId: event.requestId,
+                  }),
+                }
+                setMessages((prev) => [...prev, errorMessage])
+                setLoading(false)
+                setActivity(null)
                 return
               }
             } catch {
@@ -180,11 +259,17 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
         }
 
         if (finalResult !== null) {
-          const assistantMessage: QAMessage = {
+          const assistantMessage: LocalQaMessage = {
             role: 'assistant',
             content: finalResult.answer,
             filesReferenced: finalResult.filesReferenced,
             timestamp: nowIso(),
+            ...(finalResult.classification !== undefined && {
+              classification: finalResult.classification,
+            }),
+            ...(finalResult.suggestions !== undefined && {
+              suggestions: finalResult.suggestions,
+            }),
           }
           setMessages((prev) => [...prev, assistantMessage])
         } else {
@@ -298,11 +383,12 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
           {messages.map((msg, i) => {
             const isFirstOfPair = msg.role === 'user' && i > 0
             const expanded =
-              msg.role === 'assistant'
+              msg.role === 'assistant' && !msg.isError
                 ? isAssistantExpanded(i, msg.content)
                 : true
             const shouldShowToggle =
               msg.role === 'assistant' &&
+              !msg.isError &&
               msg.content.length > COLLAPSE_CHAR_THRESHOLD
             const isLatestAssistant =
               msg.role === 'assistant' && i === lastAssistantIndex
@@ -314,19 +400,119 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
                   isFirstOfPair ? 'border-t border-zinc-800/60' : ''
                 } ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
-                <div
-                  className={`max-w-[90%] rounded-xl px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
-                    msg.role === 'user'
-                      ? 'bg-zinc-800 text-zinc-100'
-                      : 'bg-zinc-900 border border-zinc-800 text-zinc-100'
-                  } ${
-                    msg.role === 'assistant' && !expanded
-                      ? 'line-clamp-3'
-                      : ''
-                  }`}
-                >
-                  {msg.content}
-                </div>
+                {msg.isError ? (
+                  <div className="max-w-[90%] rounded-xl px-3.5 py-2.5 text-sm leading-relaxed bg-red-950/40 border border-red-900 text-red-200">
+                    <p className="font-medium mb-1">
+                      {msg.errorCode === 'UPSTREAM_OVERLOADED'
+                        ? 'The AI service is temporarily overloaded. Try again in a moment.'
+                        : msg.errorCode === 'UPSTREAM_UNAVAILABLE'
+                          ? 'Connection issue. Please try again.'
+                          : 'Something went wrong. If this persists, please reload the page.'}
+                    </p>
+                    {msg.requestId !== undefined && msg.requestId !== '' && (
+                      <p className="text-xs text-red-300/70 mt-1 font-mono">
+                        Request ID: {msg.requestId}
+                      </p>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-2"
+                      onClick={() => {
+                        const errorIdx = messages.indexOf(msg)
+                        for (let j = errorIdx - 1; j >= 0; j--) {
+                          const prevMsg = messages[j]
+                          if (prevMsg?.role === 'user') {
+                            void sendQuestion(prevMsg.content)
+                            break
+                          }
+                        }
+                      }}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                ) : (
+                  <div
+                    className={`max-w-[90%] rounded-xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                      msg.role === 'user'
+                        ? 'bg-zinc-800 text-zinc-100 whitespace-pre-wrap'
+                        : 'bg-zinc-900 border border-zinc-800 text-zinc-100'
+                    }`}
+                  >
+                    {msg.role === 'user' ? (
+                      msg.content
+                    ) : (
+                      <div
+                        className={
+                          !expanded ? 'max-h-[6em] overflow-hidden' : undefined
+                        }
+                      >
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            code({
+                              inline,
+                              className,
+                              children,
+                              ...props
+                            }: React.HTMLAttributes<HTMLElement> & {
+                              inline?: boolean
+                            }) {
+                              const match = /language-(\w+)/.exec(
+                                className ?? '',
+                              )
+                              const text = String(children).replace(/\n$/, '')
+                              if (!inline && match) {
+                                return (
+                                  <SyntaxHighlighter
+                                    language={match[1]}
+                                    style={oneDark}
+                                    PreTag="div"
+                                    customStyle={{
+                                      borderRadius: '0.5rem',
+                                      fontSize: '0.8rem',
+                                    }}
+                                  >
+                                    {text}
+                                  </SyntaxHighlighter>
+                                )
+                              }
+                              if (looksLikeFilePath(text) && ownerRepo !== null) {
+                                return (
+                                  <a
+                                    href={buildGitHubFileUrl(
+                                      ownerRepo.owner,
+                                      ownerRepo.repo,
+                                      branch,
+                                      text,
+                                    )}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="bg-zinc-800 text-emerald-400 hover:text-emerald-300 px-1 py-0.5 rounded text-xs font-mono"
+                                  >
+                                    {text}
+                                  </a>
+                                )
+                              }
+                              return (
+                                <code
+                                  className="bg-zinc-800 text-zinc-100 px-1 py-0.5 rounded text-xs font-mono"
+                                  {...props}
+                                >
+                                  {text}
+                                </code>
+                              )
+                            },
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {shouldShowToggle && (
                   <button
@@ -342,7 +528,7 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
                   </button>
                 )}
 
-                {msg.role === 'assistant' && msg.filesReferenced.length > 0 && (
+                {msg.role === 'assistant' && !msg.isError && msg.filesReferenced.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 max-w-[90%]">
                     {msg.filesReferenced.map((file) => {
                       const href =
@@ -375,6 +561,33 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
                     })}
                   </div>
                 )}
+
+                {!msg.isError &&
+                  msg.role === 'assistant' &&
+                  msg.classification === 'off_topic' &&
+                  msg.suggestions !== undefined &&
+                  msg.suggestions.length > 0 &&
+                  i === lastAssistantIndex && (
+                    <div className="max-w-[90%] mt-3">
+                      <p className="text-xs text-zinc-500 mb-2">Try asking instead:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {msg.suggestions.map((suggestion, sIdx) => (
+                          <button
+                            key={sIdx}
+                            type="button"
+                            onClick={() => {
+                              setInput('')
+                              void sendQuestion(suggestion)
+                            }}
+                            disabled={loading}
+                            className="text-xs px-3 py-1.5 rounded-full border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
+                          >
+                            {suggestion}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
               </div>
             )
           })}

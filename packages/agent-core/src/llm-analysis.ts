@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
 import { calculateCost } from './pricing'
+import { withAnthropicRetry } from './anthropic-retry'
 import type {
   AnalysisMeta,
   ArchitectureInsights,
@@ -911,21 +912,23 @@ async function* runReactPhase(
     }
 
     const apiStart = Date.now()
-    const response = await ctx.client.messages.create({
-      model: ctx.model,
-      max_tokens: 2000,
-      system: SYSTEM_PROMPT,
-      tools: ctx.tools,
-      messages: ctx.messages,
-      ...(isForced
-        ? {
-            tool_choice: {
-              type: 'tool' as const,
-              name: ctx.finishToolName,
-            },
-          }
-        : {}),
-    })
+    const response = await withAnthropicRetry(() =>
+      ctx.client.messages.create({
+        model: ctx.model,
+        max_tokens: 2000,
+        system: SYSTEM_PROMPT,
+        tools: ctx.tools,
+        messages: ctx.messages,
+        ...(isForced
+          ? {
+              tool_choice: {
+                type: 'tool' as const,
+                name: ctx.finishToolName,
+              },
+            }
+          : {}),
+      }),
+    )
     console.log(`[timing] anthropic api call took ${Date.now() - apiStart}ms`)
     phaseTokensIn += response.usage.input_tokens
     phaseTokensOut += response.usage.output_tokens
