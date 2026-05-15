@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { AnalysisResult } from './analysis-result'
 import { AnalysisProgress } from './analysis-progress'
 
-const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
+const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
 
 function isValidGitHubUrl(url: string): boolean {
   return GITHUB_URL_REGEX.test(url.trim())

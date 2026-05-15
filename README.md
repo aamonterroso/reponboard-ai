@@ -35,11 +35,15 @@ Paste a GitHub URL → Get an instant breakdown:
 
 ## ✨ Features
 
-- **Onboarding Journey** — Interactive timeline of stops with progress tracking, time estimates, and clickable GitHub links. Marks where to start, what to read next, and how long each step takes.
-- **Architecture Detection** — Identifies the pattern (monolith, monorepo, microservices, MVC, layered, event-driven, serverless, jamstack, library) and pairs it with a rich descriptive subtitle so the label isn't just a slug.
-- **Stack Refinement** — Heuristic stack detection (runtime, framework, language, package manager) refined by Claude with reasoning you can read.
-- **Key Files Summary** — Categorized file list (entry-point, core-logic, configuration, …) annotated with what each file does and why it matters.
-- **Interactive Q&A** — Floating "Ask the agent" drawer (bottom-right FAB). A ReAct agent uses Claude tool_use to fetch files and search code on demand, with file references rendered as clickable GitHub links. Off-topic questions are politely declined — the agent only answers about the analyzed repo.
+- **Onboarding Journey** — Interactive timeline of stops with progress tracking, time estimates, and clickable GitHub links.
+- **Architecture Detection** — Identifies the pattern (monolith, monorepo, microservices, MVC, layered, event-driven, serverless, jamstack, library) with a descriptive subtitle.
+- **Intent-based Model Routing** — Pipeline supports `fast` (Haiku 4.5) and `quality` (Sonnet 4) intents per request. Benchmarked across 40 runs on canonical repos with findings on actual speed/cost/quality tradeoffs.
+- **Stack Refinement** — Heuristic stack detection refined by Claude with reasoning you can read.
+- **Key Files Summary** — Categorized file list annotated with what each file does and why it matters.
+- **Interactive Q&A with Defense-in-Depth** — Floating chat drawer where a ReAct agent uses Claude tool_use to fetch files on demand. Four layers of defense (system prompt invariant, pre-flight classifier, post-hoc validator, structured observability) prevent multi-turn guardrail decay and hallucinated file references. Off-topic questions are declined with clickable suggestions for repo-scoped questions instead.
+- **Markdown + Syntax Highlighting** — Q&A answers render with full markdown, Prism syntax highlighting for 10 languages, and inline file paths auto-linked to GitHub.
+- **Resilient Error Handling** — Anthropic 529/503/network errors retry with exponential backoff; if exhausted, the UI surfaces a friendly fallback with a Retry button instead of raw error JSON.
+- **Structured Observability** — Every Q&A request emits one [qa-telemetry] JSON log line with classification, cost, latency, validator outcomes, retries, and fatal errors.
 
 ![Q&A drawer with on-topic question](docs/qa-demo.png)
 
@@ -87,11 +91,64 @@ GitHub URL
 
 ## 🏛️ Architecture Highlights
 
-- **Two-layer pipeline** — Layer 1 (`discovery.ts`) does fast heuristic detection without any LLM call (free, deterministic). Layer 2 (`llm-analysis.ts`) calls Claude only on the highest-value files, controlling cost and latency.
-- **ReAct agent with tool_use** — Both the analysis pipeline and the Q&A use Claude's tool_use API in a ReAct loop with bounded tool calls. No fragile JSON-string parsing — `finish_analysis` and `respond` are themselves tools, so the structured output is enforced by the model API.
-- **NDJSON streaming** — The `/api/analyze` route streams progress events (discovery → fetching → analyzing → complete) so users see perceived progress instead of a 30-second blank screen.
-- **Defensive coercion** — When the LLM occasionally omits fields under tool-call/token pressure, missing data falls back to heuristic discovery results rather than failing the whole analysis. Each fallback emits a `[LLM]` warning for observability.
-- **Reusable agent-core package** — The agent lives in `packages/agent-core` independent of Next.js, so the same logic can power a CLI, a Slack bot, or any other surface without code duplication.
+- **Two-layer analysis pipeline** — Layer 1 (`discovery.ts`) does fast heuristic detection without any LLM call. Layer 2 (`llm-analysis.ts`) calls Claude only on the highest-value files, controlling cost and latency.
+- **Q&A Defense-in-Depth** — Four layers (system prompt / classifier / validator / observability) reduce off-topic query cost from ~$0.023 to ~$0.001 (22x reduction) and eliminate hallucinated file references.
+- **Intent-based LLM routing** — `fast` (Haiku) vs `quality` (Sonnet) intent per request, with empirical benchmark informing the tradeoff. Sonnet is not strictly better: truncation rate is actually higher on Sonnet (40%) than Haiku (20%) on this workload, which is why defensive coercion is a first-class concern.
+- **ReAct agent with tool_use** — Both pipelines use Claude's tool_use API with bounded tool calls. `finish_core`, `finish_guide`, and `respond` are themselves tools, so structured output is enforced by the model API.
+- **NDJSON streaming** — `/api/analyze` and `/api/qa` both stream progress events so users see perceived progress instead of dead air.
+- **Upstash Redis rate limiting with env isolation** — Keys prefixed with environment (`prod:` / `preview:` / `dev:`) let local development share an Upstash DB with production without polluting counters.
+- **Structured telemetry** — Every Q&A request emits one [qa-telemetry] JSON line with classification, cost, latency, validator outcomes, retries, and fatal errors. Read from Vercel logs.
+- **Reusable agent-core package** — Agent logic lives in `packages/agent-core` independent of Next.js for future CLI, Slack bot, or other surfaces.
+
+---
+
+## 📊 Benchmark
+
+A canonical benchmark (Block G, N=40) compared Haiku 4.5 and Sonnet 4 on this exact pipeline across two reference repos: `colinhacks/zod` and `pallets/flask`. Methodology documented in [BENCHMARK_NOTES.md](BENCHMARK_NOTES.md) at repo root. Results frozen as of May 2026 under `benchmark-results/block-g-final-canonical/`.
+
+Headline findings:
+- Sonnet/Haiku speed ratio: **1.5–1.8×** in practice (advertised 4-5× ratio does not hold for this workload)
+- Cost ratio: **~3.0×** (Sonnet expectedly more expensive)
+- Truncation rate: Sonnet truncates more often (**40%**) than Haiku (**20%**), despite making fewer tool calls overall. Defensive coercion in the codebase is therefore a feature, not a workaround.
+
+The benchmark informed the intent-based routing decision: premium models are not strictly better for this workload, and defensive engineering matters more than model selection.
+
+---
+
+## 📈 Observability
+
+Every Q&A request emits one structured JSON line to stdout:
+
+```json
+{
+  "requestId": "...",
+  "timestamp": "...",
+  "repoUrl": "...",
+  "questionLength": 41,
+  "questionHashPrefix": "66113702",
+  "classification": "on_topic",
+  "classifierConfidence": 0.95,
+  "classifierLatencyMs": 1162,
+  "classifierDegradedMode": false,
+  "toolCallsUsed": 2,
+  "toolBudgetExhausted": false,
+  "hallucinatedFileReferences": [],
+  "responseRejectedByValidator": false,
+  "retryCount": 0,
+  "finalCostUsd": 0.013489,
+  "finalLatencyMs": 9859,
+  "historyLength": 1,
+  "fatalError": null
+}
+```
+
+Grep Vercel logs by `[qa-telemetry]` prefix. Useful queries:
+- `classifierDegradedMode: true` → classifier failures
+- `responseRejectedByValidator: true` → validator catches
+- `finalCostUsd > 0.05` → expensive queries to investigate
+- `fatalError != null` → unrecoverable errors
+
+Persistent storage in Neon Postgres planned in Tier 2.
 
 ---
 
@@ -131,26 +188,38 @@ LLM_MODE=development           # development (Haiku, fast) | production (Sonnet,
 ```
 reponboard-ai/
 ├── apps/
-│   └── web/                       # Next.js application
+│   └── web/                          # Next.js application
 │       ├── app/
 │       │   ├── api/
-│       │   │   ├── analyze/       # POST — streaming NDJSON analysis
-│       │   │   ├── qa/            # POST — streaming Q&A response
-│       │   │   └── remaining/     # GET — daily quota left
-│       │   └── page.tsx           # Landing + result view
+│       │   │   ├── analyze/route.ts  # POST — streaming NDJSON analysis
+│       │   │   ├── qa/route.ts       # POST — streaming Q&A (classifier
+│       │   │   │                     # pre-flight, validator post-hoc,
+│       │   │   │                     # telemetry emission)
+│       │   │   └── remaining/route.ts # GET — daily quota left
+│       │   └── page.tsx              # Landing + result view
 │       └── components/
-│           ├── analysis-result.tsx  # Result page (Journey, Stack, etc.)
-│           ├── url-input.tsx        # Input form + stream consumer
-│           └── qa-chat.tsx          # Floating Q&A drawer
+│           ├── analysis-result.tsx     # Result page (Journey, Stack, etc.)
+│           ├── url-input.tsx           # Input form + stream consumer
+│           ├── mermaid-diagram.tsx     # Mermaid renderer
+│           └── qa-chat.tsx             # Floating Q&A drawer (markdown,
+│                                      # suggestion chips, error fallback)
 ├── packages/
-│   └── agent-core/                # Reusable agent logic
+│   └── agent-core/                   # Reusable agent logic
 │       └── src/
-│           ├── discovery.ts         # Layer 1 — heuristic detection
-│           ├── llm-analysis.ts      # Layer 2 — ReAct agent (tool_use)
-│           ├── full-analysis.ts     # Orchestrator (generator stream)
-│           ├── qa.ts                # Q&A ReAct agent
-│           └── types.ts             # Shared types
-└── CLAUDE.md                      # Architecture / contribution guide
+│           ├── anthropic-retry.ts      # 529/503/network retry helper
+│           ├── discovery.ts            # Layer 1 — heuristic detection
+│           ├── llm-analysis.ts         # Layer 2 — ReAct agent (tool_use)
+│           ├── full-analysis.ts        # Orchestrator (generator stream)
+│           ├── qa.ts                   # Q&A ReAct agent
+│           ├── qa-classifier.ts        # Pre-flight classifier (Haiku 4.5)
+│           ├── qa-validator.ts         # Post-hoc validator (hallucination
+│           │                           # + recap detection)
+│           ├── qa-telemetry.ts         # Structured observability emitter
+│           └── types.ts                # Shared types
+├── benchmark-results/
+│   └── block-g-final-canonical/      # Frozen Haiku vs Sonnet dataset
+├── BENCHMARK_NOTES.md                # Benchmark methodology
+└── CLAUDE.md                         # Architecture / contribution guide
 ```
 
 ---
@@ -159,17 +228,22 @@ reponboard-ai/
 
 | Guardrail | Details |
 |-----------|---------|
-| URL validation | Only accepts `github.com/<owner>/<repo>` URLs — no deep paths, no other hosts |
-| Rate limiting | 5 analyses/day globally, 3/day per IP (in-memory, resets at midnight UTC) |
-| Timeout | 60 s code-level cap on the analysis; Edge streams tokens so progress is visible |
-| Cost protection | Max 12 key files sent to LLM, binary/lock files excluded, max 4096 tokens |
+| URL validation | Only accepts `github.com/<owner>/<repo>` URLs |
+| Rate limiting | Upstash Redis: 5 analyses/day globally, 3/day per IP, daily TTL, env-prefixed keys |
+| Q&A guardrail | Four-layer defense-in-depth (system prompt + classifier + validator + observability) |
+| Q&A scope | Off-topic questions declined with clickable suggestions; classifier short-circuits before ReAct |
+| SDK retry | 3 attempts × exponential backoff on 529/503/network errors |
+| Error UI | Friendly fallback with Retry button; never exposes raw error JSON |
+| Cost protection | Max 12 key files to LLM in analysis; classifier short-circuits off-topic at ~$0.001 |
+| Timeout | 60s code-level cap on analysis; classifier 12s with retry |
 
-### Deployment constraint: Vercel free-tier Edge
+### Deployment on Vercel Edge
 
-The production demo runs on Vercel's free (Hobby) plan, where Edge Functions are hard-killed at ~30 s. Haiku occasionally needs longer than that for large repos, which will appear to the user as a truncated stream. To serve larger repos end-to-end, pick one:
+The production demo runs on Vercel's free (Hobby) plan with Edge Functions. The advertised cap is 300s execution time provided the first byte is sent within 25s, which the NDJSON streaming architecture satisfies (first event within ~1s of request receipt). Empirical measurements have not yet stressed this cap; large repos that historically appeared truncated were likely hitting the 30s Serverless function limit rather than the Edge limit. If you encounter truncation in a forked deploy, verify the runtime is actually Edge in your function config.
 
-- **Upgrade to Vercel Pro** — raises Edge duration to 300 s.
-- **Self-host the API route** — move `apps/web/app/api/analyze` to a long-running runtime (Cloudflare Workers w/ paid plan, Fly.io, Railway, a small VPS) and proxy from Vercel. The code is Edge-compatible so the port is mostly mechanical.
+For self-hosting:
+- **Vercel Pro** — full 300s Edge duration ceiling
+- **Cloudflare Workers (paid)**, **Fly.io**, **Railway**, or a small VPS — port is mostly mechanical since the agent code is runtime-agnostic via the agent-core package
 
 ---
 
@@ -186,16 +260,31 @@ pnpm lint         # Linting
 
 ## 🗺️ Roadmap
 
-Shipping next:
+**Just shipped:**
+- Q&A guardrail defense-in-depth (4 layers)
+- Markdown rendering + syntax highlighting + GitHub linkification
+- Suggestion chips on off-topic refusals
+- Anthropic SDK retry with UI error fallback
+- Upstash Redis with env-prefixed keys (dev/preview/prod isolated)
+- Empirical benchmark (Block G, N=40) for Haiku vs Sonnet on this exact pipeline
 
-- **Session persistence** — Remember journey progress and analysis result across page refreshes
-- **CLI** — `npx reponboard <url>` for terminal-native onboarding
-- **Cached analyses** — Vercel KV cache by `owner/repo/sha` to skip redundant LLM calls and share results across users
+**Next sprint (P0 hot-fix):**
+- Empty answer fallback for tool-budget-exhausted edge case
+- Force `respond` tool_choice in Q&A budget-cap branch
 
-Exploring:
+**Shipping next:**
+- AbortController timeouts across Anthropic SDK + GitHub fetch
+- tool_use migration for analysis (eliminate truncation bugs)
+- Validator retry feedback streamed to UI
+- Neon Postgres + Drizzle for persistent telemetry
+- Shareable analysis links `/analysis/{id}` with OG previews
+- Session persistence across page refreshes
+- CLI hybrid (`npx reponboard <url>` + browser open)
 
-- **PR/Commit Timeline Analyzer** — "What changed while you were away" narrative with AI-summarized commits and PR activity
-- **Slack delivery** — Scheduled Timeline Analyzer reports posted to engineering channels
+**Exploring:**
+- PR/Commit Timeline Analyzer ("what changed while you were away")
+- Slack delivery for engineering channel reports
+- Model Lab (model selector + cost/latency telemetry visible per request)
 
 ---
 
