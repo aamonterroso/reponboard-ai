@@ -9,7 +9,7 @@ import {
   recordRequestStart,
 } from '@/lib/rate-limit'
 
-const GITHUB_URL_REGEX = /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/
+const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
 // Code-level cap on the analysis. Verified empirically that
 // Vercel Edge on the Hobby plan supports up to ~300s when the
 // response is streamed (test endpoint /timeout-test ran 89.91s
