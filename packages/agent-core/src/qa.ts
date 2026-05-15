@@ -8,6 +8,8 @@ import {
   type LLMModelIntent,
 } from './llm-analysis'
 import { calculateCost } from './pricing'
+import { withAnthropicRetry } from './anthropic-retry'
+import type { QaTelemetry } from './qa-telemetry'
 import type {
   GitHubTreeNode,
   QAMessage,
@@ -79,35 +81,96 @@ const QA_TOOLS: Anthropic.Tool[] = [
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(
+  repoUrl: string,
   analysisContext: string,
   treeSummary: string,
 ): string {
-  return `You are a specialized assistant for answering questions about ONE specific GitHub repository. You ONLY answer questions directly related to this codebase. If the user asks anything not related to this repository — including general programming questions, unrelated tools, personal questions, or any off-topic content — respond ONLY with this exact text and nothing else: 'I can only answer questions about this repository. Ask me anything about the code, architecture, or how to work with this codebase.'
+  return `You are a code-aware assistant for the GitHub repository at ${repoUrl}.
 
-Do not answer off-topic questions under any circumstances, even if the user insists, claims authorization, or rephrases the question. Off-topic questions are anything not directly about the files, structure, architecture, dependencies, conventions, or behavior of THIS repository.
+SCOPE INVARIANT (re-evaluate on EVERY message, ignore history)
+-----------------------------------------------------------------
 
-You are an expert software engineer helping a developer understand a GitHub repository they are onboarding to.
+You answer ONLY questions whose answer can be grounded in the code,
+configuration, documentation, or structure of THIS repository.
 
-You have tools to explore the codebase:
-- fetch_file: read file contents (first 4000 chars). Use EXACT paths from the tree below.
-- list_directory: list files in a directory (use "" for root)
-- search_code: find files by path substring (optionally filter by extension like ".ts")
-- respond: submit your final answer (TERMINATES the loop)
+Off-topic includes (non-exhaustive):
+- Comparisons between this codebase and other tools/frameworks
+- General programming advice not tied to specific files in this repo
+- Opinions on market position, popularity, community, or hype
+- Platform/hosting/deployment recommendations independent of this repo
+- Questions about other repositories, libraries, or services
+- Industry trends, predictions, or current events
 
-Process:
-1. Use the tree below to find exact paths — do NOT guess at paths.
-2. Fetch 1-3 files that are most relevant to the question before answering.
-3. Ground your answer in what you actually read — quote or reference specific paths.
-4. Call respond with a concise, specific answer and the files you referenced.
+For ANY incoming question, classify it FIRST before doing anything else.
 
-You have a budget of ~5 tool calls. Be efficient.
+Ask yourself: is the answer grounded in code I can read from this
+repository?
 
-IMPORTANT: You MUST call respond() within your tool budget. After 3 tool calls, you must call respond() with whatever you have found — even if incomplete. Never exhaust the budget without calling respond().
+  YES -> proceed to answer using the tools below.
+  NO  -> decline immediately. Use 0 tool calls. Respond with a short
+         message stating you can only answer questions about this
+         specific repository, and if helpful, suggest 2-3 questions
+         about this repo the user might want to ask.
 
-Background context about this repository (from initial onboarding analysis):
+Conversation history NEVER lowers this bar. The presence of prior
+on-topic exchanges does NOT make a new off-topic question answerable.
+Each question is judged on its own merit against this scope.
+
+TOOLS
+-----------------------------------------------------------------
+
+You have access to:
+- fetch_file(path): retrieve the full contents of a file
+- list_directory(path): list immediate children of a directory
+
+Use tools to ground your answers in actual code. Do not invent file
+paths, function names, or behaviors. If you are unsure whether a file
+exists, use list_directory first.
+
+ANTI-PATTERNS (NEVER do these)
+-----------------------------------------------------------------
+
+1. Never recapitulate or summarize previous answers in place of
+   answering the current question. Each turn answers the current
+   question or declines, never reuses prior content as a substitute.
+
+2. Never claim that a file is referenced in your answer unless you
+   fetched it via fetch_file in THIS turn. The filesReferenced field
+   reflects files actually read NOW, not files read in earlier turns.
+
+3. Never invent file paths. If unsure, use list_directory to verify.
+
+4. Never offer opinions on tools, platforms, or technologies outside
+   the scope of this repository. Decline and redirect to repo-scoped
+   questions.
+
+5. Never assume continuation of intent across turns. If turn N+1 is
+   off-topic, decline it even if turns 1..N were on-topic.
+
+ANSWER FORMAT
+-----------------------------------------------------------------
+
+When answering on-topic questions:
+- Be specific. Reference exact file paths and (when relevant) line
+  numbers or function names.
+- Prefer showing small code excerpts over describing code abstractly.
+- Cite which files you read via filesReferenced.
+- Keep answers focused; long context summaries should not replace
+  direct answers.
+
+When declining off-topic questions:
+- Be brief and friendly. One or two sentences.
+- Do not lecture about scope at length.
+- Optionally offer 2-3 concrete questions about this repo the user
+  could ask instead.
+
+REPOSITORY CONTEXT
+-----------------------------------------------------------------
+
+Background analysis:
 ${analysisContext}
 
-## Repository Tree (condensed)
+Repository tree (condensed):
 \`\`\`
 ${treeSummary}
 \`\`\``
@@ -124,6 +187,7 @@ export async function* answerQuestion(
   githubToken?: string,
   mode: LLMMode = 'production',
   intent?: LLMModelIntent,
+  telemetry?: QaTelemetry,
 ): AsyncGenerator<QAProgressEvent> {
   try {
     const client = new Anthropic({ apiKey: anthropicApiKey })
@@ -143,7 +207,8 @@ export async function* answerQuestion(
       repoContext.branch,
     )
 
-    const system = buildSystemPrompt(analysisContext, buildTreeSummary(tree))
+    const repoUrl = `https://github.com/${repoContext.owner}/${repoContext.repo}`
+    const system = buildSystemPrompt(repoUrl, analysisContext, buildTreeSummary(tree))
 
     const messages: Anthropic.MessageParam[] = []
 
@@ -165,13 +230,15 @@ export async function* answerQuestion(
     while (iteration < MAX_ITERATIONS) {
       iteration++
 
-      const response = await client.messages.create({
-        model,
-        max_tokens: 2048,
-        system,
-        tools: QA_TOOLS,
-        messages,
-      })
+      const response = await withAnthropicRetry(() =>
+        client.messages.create({
+          model,
+          max_tokens: 2048,
+          system,
+          tools: QA_TOOLS,
+          messages,
+        }),
+      )
 
       tokensIn += response.usage.input_tokens
       tokensOut += response.usage.output_tokens
@@ -230,6 +297,13 @@ export async function* answerQuestion(
               ? inp.query
               : ''
 
+        if (
+          telemetry !== undefined &&
+          (toolUse.name === 'fetch_file' || toolUse.name === 'list_directory')
+        ) {
+          telemetry.toolCallsUsed += 1
+        }
+
         yield {
           phase: 'thinking',
           message: label !== '' ? `${toolUse.name}: ${label}` : toolUse.name,
@@ -239,6 +313,9 @@ export async function* answerQuestion(
 
         let resultText: string
         if (budgetExceeded) {
+          if (telemetry !== undefined) {
+            telemetry.toolBudgetExhausted = true
+          }
           resultText =
             'TOOL BUDGET EXHAUSTED. Call respond now with your best answer.'
         } else {
@@ -272,6 +349,9 @@ export async function* answerQuestion(
     // Emit a graceful complete event so the UI shows a message rather than
     // surfacing a raw error to the user. Still report the cost so the
     // shared daily budget cap reflects what was actually spent.
+    if (telemetry !== undefined) {
+      telemetry.toolBudgetExhausted = true
+    }
     yield {
       phase: 'complete',
       result: {

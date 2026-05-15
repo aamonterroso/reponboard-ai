@@ -4,8 +4,13 @@ import { NextResponse } from 'next/server'
 import {
   GitHubClient,
   answerQuestion,
+  buildInitialTelemetry,
+  emitQaTelemetry,
   parseGitHubUrl,
+  classifyQuestion,
+  validateQaResponse,
   type LLMModelIntent,
+  type QaTelemetry,
   type QAMessage,
 } from '@reponboard/agent-core'
 import {
@@ -95,6 +100,15 @@ function parseBody(body: unknown): QARequestBody | string {
 }
 
 export async function POST(request: Request): Promise<NextResponse | Response> {
+  const startTime = Date.now()
+  let telemetry: QaTelemetry | null = null
+
+  const emit = (): void => {
+    if (telemetry === null) return
+    telemetry.finalLatencyMs = Date.now() - startTime
+    emitQaTelemetry(telemetry)
+  }
+
   let body: unknown
   try {
     body = await request.json()
@@ -107,7 +121,15 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     return NextResponse.json({ error: parsed }, { status: 400 })
   }
 
+  telemetry = buildInitialTelemetry({
+    requestId: crypto.randomUUID(),
+    repoUrl: parsed.repoUrl,
+    question: parsed.question,
+    historyLength: parsed.history.length,
+  })
+
   if (!GITHUB_URL_REGEX.test(parsed.repoUrl)) {
+    emit()
     return NextResponse.json(
       {
         error:
@@ -119,6 +141,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
 
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
   if (anthropicApiKey === undefined || anthropicApiKey === '') {
+    emit()
     return NextResponse.json(
       { error: 'Q&A is not available (ANTHROPIC_API_KEY not configured).' },
       { status: 503 },
@@ -137,6 +160,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         : rateLimit.reason === 'global_limit'
           ? 'Q&A daily limit reached. Try again tomorrow or run locally.'
           : "You've used your Q&A allowance for today. Try again tomorrow or run locally."
+    emit()
     return NextResponse.json(
       { error: message, reason: rateLimit.reason },
       { status: 429 },
@@ -153,6 +177,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     repo = parsedUrl.repo
     branch = parsedUrl.branch
   } catch (err) {
+    emit()
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Invalid repo URL' },
       { status: 400 },
@@ -168,6 +193,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       const info = await github.getRepoInfo(owner, repo)
       resolvedBranch = info.defaultBranch
     } catch (err) {
+      emit()
       return NextResponse.json(
         {
           error:
@@ -178,6 +204,101 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         { status: 502 },
       )
     }
+  }
+
+  const classifyResult = await classifyQuestion({
+    question: parsed.question,
+    repoUrl: parsed.repoUrl,
+    repoSummary: parsed.codebaseContext.slice(0, 500),
+    anthropicApiKey,
+  })
+  telemetry.classification = classifyResult.result.classification
+  telemetry.classifierConfidence = classifyResult.result.confidence
+  telemetry.classifierLatencyMs = classifyResult.latencyMs
+  telemetry.classifierDegradedMode = classifyResult.degradedMode
+
+  const { classification, confidence } = classifyResult.result
+  const isOffTopicShortcut =
+    classification === 'off_topic' &&
+    (confidence > 0.7 || classifyResult.degradedMode)
+  const isClarificationShortcut =
+    classification === 'needs_clarification' &&
+    confidence > 0.7 &&
+    !classifyResult.degradedMode
+  const isShortcutPath = isOffTopicShortcut || isClarificationShortcut
+
+  if (isShortcutPath) {
+    const cannedAnswer =
+      classification === 'off_topic'
+        ? `I can only answer questions about ${parsed.repoUrl}. ${classifyResult.result.reasoning}`
+        : `Could you clarify what you're asking? ${classifyResult.result.reasoning}`
+
+    telemetry.finalCostUsd = classifyResult.costUsd
+    const shortcutTelemetry = telemetry
+    emit()
+
+    const shortcutResult: Record<string, unknown> = {
+      answer: cannedAnswer,
+      filesReferenced: [],
+      costUsd: classifyResult.costUsd,
+      classification: classifyResult.result.classification,
+      meta: {
+        classifierConfidence: classifyResult.result.confidence,
+        classifierDegradedMode: classifyResult.degradedMode,
+      },
+    }
+    if (
+      classification === 'off_topic' &&
+      classifyResult.result.suggestions !== undefined
+    ) {
+      shortcutResult.suggestions = classifyResult.result.suggestions
+    }
+
+    const shortcutEncoder = new TextEncoder()
+    const shortcutStream = new ReadableStream({
+      start(controller) {
+        try {
+          controller.enqueue(
+            shortcutEncoder.encode(
+              JSON.stringify({ phase: 'complete', result: shortcutResult }) + '\n',
+            ),
+          )
+        } catch (err) {
+          if (shortcutTelemetry !== null) {
+            shortcutTelemetry.fatalError =
+              err instanceof Error ? err.message : String(err)
+          }
+          try {
+            controller.enqueue(
+              shortcutEncoder.encode(
+                JSON.stringify({
+                  phase: 'error',
+                  error:
+                    'Something went wrong. If this persists, please reload the page.',
+                  errorCode: 'INTERNAL_ERROR',
+                  requestId: shortcutTelemetry?.requestId ?? '',
+                }) + '\n',
+              ),
+            )
+          } catch {
+            /* ignore */
+          }
+        }
+        try {
+          controller.close()
+        } catch {
+          /* ignore */
+        }
+      },
+    })
+
+    return new Response(shortcutStream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+        'Cache-Control': 'no-cache',
+        'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
+      },
+    })
   }
 
   const rawIntent = process.env.LLM_MODEL_INTENT
@@ -195,6 +316,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     llmMode = rawMode
   }
 
+  const initialTelemetry = telemetry === null ? undefined : telemetry
   const generator = answerQuestion(
     parsed.question,
     { owner, repo, branch: resolvedBranch },
@@ -204,6 +326,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     githubToken,
     llmMode,
     intent,
+    initialTelemetry,
   )
 
   const encoder = new TextEncoder()
@@ -218,7 +341,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
           try {
             controller.enqueue(
               encoder.encode(
-                JSON.stringify({ phase: 'error', error: errorMsg }) + '\n',
+                JSON.stringify({
+                  phase: 'error',
+                  error: errorMsg,
+                  errorCode: 'INTERNAL_ERROR',
+                  requestId: telemetry?.requestId ?? '',
+                }) + '\n',
               ),
             )
           } catch {
@@ -240,26 +368,311 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         TIMEOUT_MS,
       )
 
+      const filesActuallyFetched = new Set<string>()
+
+      const trackFetchedFiles = (event: {
+        phase: string
+        toolCall?: string
+        toolInput?: Record<string, unknown>
+      }): void => {
+        if (event.phase === 'thinking' && event.toolCall === 'fetch_file') {
+          const path = event.toolInput?.path
+          if (typeof path === 'string') {
+            filesActuallyFetched.add(path)
+          }
+        }
+      }
+
       try {
         for await (const event of generator) {
           if (closed) break
+          trackFetchedFiles(event)
           // Charge the shared daily budget only on successful completion.
           // Errors and the timeout path skip this.
           if (event.phase === 'complete') {
-            const costUsd = event.result.costUsd ?? 0
+            const enrichedResult = {
+              ...event.result,
+              costUsd: (event.result.costUsd ?? 0) + classifyResult.costUsd,
+              classification: classifyResult.result.classification,
+              meta: {
+                classifierConfidence: classifyResult.result.confidence,
+                classifierDegradedMode: classifyResult.degradedMode,
+              },
+            }
+
+            const validation = validateQaResponse({
+              answer: event.result.answer,
+              filesReferencedClaim: event.result.filesReferenced,
+              filesActuallyFetched: Array.from(filesActuallyFetched),
+              classification: classifyResult.result.classification,
+            })
+
+            if (
+              validation.valid === false &&
+              telemetry !== null &&
+              telemetry.retryCount === 0
+            ) {
+              telemetry.responseRejectedByValidator = true
+              telemetry.retryCount = 1
+              if (validation.hallucinatedFiles !== undefined) {
+                telemetry.hallucinatedFileReferences =
+                  validation.hallucinatedFiles
+              }
+
+              const reasonText =
+                validation.reason === 'hallucinated_file_references'
+                  ? 'referenced files you did not fetch in this turn'
+                  : 'summarized previous answers instead of answering directly'
+              const hardenedQuestion =
+                `IMPORTANT: Your previous response was rejected because it ${reasonText}. ` +
+                `Answer the current question fresh using ONLY files you actually fetch_file in this turn. ` +
+                `Do not recapitulate prior context.\n\n` +
+                `Original question: ${parsed.question}`
+
+              const retryTelemetry = telemetry === null ? undefined : telemetry
+              const retryGenerator = answerQuestion(
+                hardenedQuestion,
+                { owner, repo, branch: resolvedBranch },
+                parsed.codebaseContext,
+                parsed.history,
+                anthropicApiKey,
+                githubToken,
+                llmMode,
+                intent,
+                retryTelemetry,
+              )
+
+              let retryHandled = false
+              for await (const retryEvent of retryGenerator) {
+                if (closed) break
+                trackFetchedFiles(retryEvent)
+                if (retryEvent.phase === 'complete') {
+                  const retryEnriched = {
+                    ...retryEvent.result,
+                    costUsd:
+                      (event.result.costUsd ?? 0) +
+                      (retryEvent.result.costUsd ?? 0) +
+                      classifyResult.costUsd,
+                    classification: classifyResult.result.classification,
+                    meta: {
+                      classifierConfidence: classifyResult.result.confidence,
+                      classifierDegradedMode: classifyResult.degradedMode,
+                    },
+                  }
+
+                  const retryValidation = validateQaResponse({
+                    answer: retryEvent.result.answer,
+                    filesReferencedClaim: retryEvent.result.filesReferenced,
+                    filesActuallyFetched: Array.from(filesActuallyFetched),
+                    classification: classifyResult.result.classification,
+                  })
+
+                  if (retryValidation.valid === true) {
+                    const retryCostUsd = retryEnriched.costUsd
+                    if (telemetry !== null) {
+                      telemetry.finalCostUsd = retryCostUsd
+                    }
+                    if (retryCostUsd > 0) {
+                      void recordAnalysisCost(retryCostUsd).catch((err) => {
+                        console.warn(
+                          '[rate-limit] recordAnalysisCost failed',
+                          err,
+                        )
+                      })
+                    }
+                    controller.enqueue(
+                      encoder.encode(
+                        JSON.stringify({
+                          phase: 'complete',
+                          result: retryEnriched,
+                        }) + '\n',
+                      ),
+                    )
+                  } else {
+                    const cannedResult = {
+                      answer:
+                        "I had trouble grounding my answer in this repository's actual files. " +
+                        "Could you rephrase the question or be more specific about which part of the codebase you're asking about?",
+                      filesReferenced: [],
+                      costUsd:
+                        (event.result.costUsd ?? 0) +
+                        (retryEvent.result.costUsd ?? 0) +
+                        classifyResult.costUsd,
+                      classification: 'on_topic' as const,
+                      meta: {
+                        classifierConfidence: classifyResult.result.confidence,
+                        classifierDegradedMode: classifyResult.degradedMode,
+                      },
+                    }
+                    if (telemetry !== null) {
+                      telemetry.finalCostUsd = cannedResult.costUsd
+                    }
+                    if (cannedResult.costUsd > 0) {
+                      void recordAnalysisCost(cannedResult.costUsd).catch(
+                        (err) => {
+                          console.warn(
+                            '[rate-limit] recordAnalysisCost failed',
+                            err,
+                          )
+                        },
+                      )
+                    }
+                    controller.enqueue(
+                      encoder.encode(
+                        JSON.stringify({
+                          phase: 'complete',
+                          result: cannedResult,
+                        }) + '\n',
+                      ),
+                    )
+                  }
+                  retryHandled = true
+                  break
+                } else {
+                  controller.enqueue(
+                    encoder.encode(JSON.stringify(retryEvent) + '\n'),
+                  )
+                }
+              }
+
+              if (!retryHandled && !closed) {
+                const cannedResult = {
+                  answer:
+                    "I had trouble grounding my answer in this repository's actual files. " +
+                    "Could you rephrase the question or be more specific about which part of the codebase you're asking about?",
+                  filesReferenced: [],
+                  costUsd:
+                    (event.result.costUsd ?? 0) + classifyResult.costUsd,
+                  classification: 'on_topic' as const,
+                  meta: {
+                    classifierConfidence: classifyResult.result.confidence,
+                    classifierDegradedMode: classifyResult.degradedMode,
+                  },
+                }
+                if (telemetry !== null) {
+                  telemetry.finalCostUsd = cannedResult.costUsd
+                }
+                if (cannedResult.costUsd > 0) {
+                  void recordAnalysisCost(cannedResult.costUsd).catch(
+                    (err) => {
+                      console.warn(
+                        '[rate-limit] recordAnalysisCost failed',
+                        err,
+                      )
+                    },
+                  )
+                }
+                controller.enqueue(
+                  encoder.encode(
+                    JSON.stringify({
+                      phase: 'complete',
+                      result: cannedResult,
+                    }) + '\n',
+                  ),
+                )
+              }
+              break
+            }
+
+            if (validation.valid === false) {
+              // Defensive: validator rejected AND we've already retried (or
+              // telemetry is null). Emit canned fallback.
+              const cannedResult = {
+                answer:
+                  "I had trouble grounding my answer in this repository's actual files. " +
+                  "Could you rephrase the question or be more specific about which part of the codebase you're asking about?",
+                filesReferenced: [],
+                costUsd: enrichedResult.costUsd,
+                classification: 'on_topic' as const,
+                meta: {
+                  classifierConfidence: classifyResult.result.confidence,
+                  classifierDegradedMode: classifyResult.degradedMode,
+                },
+              }
+              if (telemetry !== null) {
+                telemetry.finalCostUsd = cannedResult.costUsd
+              }
+              if (cannedResult.costUsd > 0) {
+                void recordAnalysisCost(cannedResult.costUsd).catch((err) => {
+                  console.warn('[rate-limit] recordAnalysisCost failed', err)
+                })
+              }
+              controller.enqueue(
+                encoder.encode(
+                  JSON.stringify({
+                    phase: 'complete',
+                    result: cannedResult,
+                  }) + '\n',
+                ),
+              )
+              break
+            }
+
+            const costUsd = enrichedResult.costUsd
+            if (telemetry !== null) {
+              telemetry.finalCostUsd = costUsd
+            }
             if (costUsd > 0) {
               void recordAnalysisCost(costUsd).catch((err) => {
                 console.warn('[rate-limit] recordAnalysisCost failed', err)
               })
             }
+            controller.enqueue(
+              encoder.encode(
+                JSON.stringify({ phase: 'complete', result: enrichedResult }) + '\n',
+              ),
+            )
+          } else {
+            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
           }
-          controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
         }
       } catch (err) {
-        closeStream(err instanceof Error ? err.message : 'Stream error')
+        const status =
+          typeof err === 'object' && err !== null && 'status' in err
+            ? (err as { status?: unknown }).status
+            : undefined
+        const errorCode =
+          status === 529
+            ? 'UPSTREAM_OVERLOADED'
+            : status === 503
+              ? 'UPSTREAM_UNAVAILABLE'
+              : 'INTERNAL_ERROR'
+        const errorMessage =
+          errorCode === 'UPSTREAM_OVERLOADED'
+            ? 'Service temporarily unavailable. Please try again in a moment.'
+            : errorCode === 'UPSTREAM_UNAVAILABLE'
+              ? 'Connection issue. Please try again.'
+              : 'Something went wrong. If this persists, please reload the page.'
+        if (telemetry !== null) {
+          telemetry.fatalError =
+            err instanceof Error ? err.message : String(err)
+        }
+        if (!closed) {
+          closed = true
+          try {
+            controller.enqueue(
+              encoder.encode(
+                JSON.stringify({
+                  phase: 'error',
+                  error: errorMessage,
+                  errorCode,
+                  requestId: telemetry?.requestId ?? '',
+                }) + '\n',
+              ),
+            )
+          } catch {
+            /* ignore */
+          }
+          try {
+            controller.close()
+          } catch {
+            /* ignore */
+          }
+        }
       } finally {
         clearTimeout(timeout)
         closeStream()
+        emit()
       }
     },
   })
