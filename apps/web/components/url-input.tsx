@@ -33,6 +33,12 @@ export function UrlInput(): React.JSX.Element {
     meta: AnalysisMetaByPhase | null
   } | null>(null)
   const [complete, setComplete] = useState(false)
+  // Distinct from `error`: `llmError` is the soft-failure path where
+  // /api/analyze completed end-to-end but the LLM portion fell over
+  // (e.g. Anthropic overload). Discovery is valid and rendered; only
+  // the LLM sections are degraded. We never show the raw error string
+  // to the user — the banner inside AnalysisResult uses fixed copy.
+  const [llmError, setLlmError] = useState<string | null>(null)
   const [seenPhases, setSeenPhases] = useState<Set<AnalysisPhase>>(new Set())
   const [currentPhase, setCurrentPhase] = useState<AnalysisPhase | null>(null)
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
@@ -160,6 +166,13 @@ export function UrlInput(): React.JSX.Element {
                     explorationPath: event.result.llmAnalysis.explorationPath,
                     codebaseContext: event.result.llmAnalysis.codebaseContext,
                   })
+                } else if (event.result.error !== null && event.result.error !== undefined) {
+                  // Degraded path: discovery succeeded, LLM phase failed.
+                  // Surface as soft error to AnalysisResult so the banner
+                  // and placeholder render. Do NOT route through the
+                  // top-level `error` channel — that's reserved for fatal
+                  // stream errors and would block the discovery render.
+                  setLlmError(event.result.error)
                 }
                 setCurrentPhase('complete')
                 setStreamMessage('')
@@ -198,6 +211,8 @@ export function UrlInput(): React.JSX.Element {
             explorationPath: fallback.llmAnalysis.explorationPath,
             codebaseContext: fallback.llmAnalysis.codebaseContext,
           })
+        } else if (fallback.error !== null && fallback.error !== undefined) {
+          setLlmError(fallback.error)
         }
         setCurrentPhase('complete')
         setStreamMessage('')
@@ -218,6 +233,7 @@ export function UrlInput(): React.JSX.Element {
   function handleReset(): void {
     setUrl('')
     setError(null)
+    setLlmError(null)
     setCore(null)
     setGuide(null)
     setDiscovery(null)
@@ -246,6 +262,7 @@ export function UrlInput(): React.JSX.Element {
             currentPhase={currentPhase}
             progress={progress ?? undefined}
             message={streamMessage}
+            failed={llmError !== null && complete}
           />
         )}
         {error !== null && (
@@ -259,6 +276,7 @@ export function UrlInput(): React.JSX.Element {
           discovery={discovery}
           analysisMeta={analysisMeta}
           complete={complete}
+          llmError={llmError}
           onReset={handleReset}
         />
       </div>

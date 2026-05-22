@@ -29,7 +29,68 @@ interface AnalysisResultProps {
   discovery: DiscoveryResult | null
   analysisMeta: { id: string; repoUrl: string; meta: AnalysisMetaByPhase | null } | null
   complete: boolean
+  // When set together with `complete=true` and `core===null`, the
+  // analysis ran end-to-end but the LLM phase failed (e.g. Anthropic
+  // overload). The UI renders discovery as-is plus an explanatory
+  // banner + placeholder card. The raw error text is NEVER displayed
+  // to the user — the banner copy is fixed product copy.
+  llmError?: string | null
   onReset: () => void
+}
+
+// ─── Degraded-state primitives ────────────────────────────────────────────────
+
+function DegradedBanner(): React.JSX.Element {
+  return (
+    <div
+      role="status"
+      className="bg-amber-950/40 border border-amber-800/50 rounded-xl px-4 py-3 flex items-start gap-3"
+    >
+      <svg
+        className="h-5 w-5 text-amber-400 shrink-0 mt-0.5"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={2}
+        aria-hidden="true"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M12 9v3.75m0 3.75h.008v.008H12v-.008zM21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+        />
+      </svg>
+      <div className="flex flex-col gap-1 min-w-0">
+        <p className="text-sm font-medium text-amber-200">
+          AI analysis is temporarily unavailable
+        </p>
+        <p className="text-xs text-amber-300/80 leading-relaxed">
+          Claude&apos;s API is overloaded right now. Below is the repository
+          structure we detected without AI. Try again in a moment for the full
+          onboarding guide.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function LLMPlaceholderSection(): React.JSX.Element {
+  return (
+    <Card className="animate-fade-slide-up border-dashed border-zinc-800 bg-zinc-900/40">
+      <CardHeader>
+        <CardTitle className="text-zinc-400">
+          Onboarding journey &amp; architecture summary
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-zinc-500 leading-relaxed">
+          Requires AI analysis — unavailable right now. Reload the page or try
+          this repo again in a moment to generate the executive summary,
+          architecture pattern, and step-by-step onboarding journey.
+        </p>
+      </CardContent>
+    </Card>
+  )
 }
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
@@ -749,14 +810,26 @@ export function AnalysisResult({
   discovery,
   analysisMeta,
   complete,
+  llmError = null,
   onReset,
 }: AnalysisResultProps): React.JSX.Element {
   const isHeuristicOnly = complete && core === null && discovery !== null
+  // Degraded state: the analysis completed end-to-end but the LLM
+  // portion failed and the backend surfaced an error alongside the
+  // discovery payload. Distinct from non-code repos, which also land
+  // in isHeuristicOnly but for a healthy reason.
+  const isLLMDegraded =
+    isHeuristicOnly &&
+    llmError !== null &&
+    discovery !== null &&
+    discovery.repoType.type === 'code'
   const isNonCode =
     discovery !== null && discovery.repoType.type !== 'code'
 
   return (
     <div className="w-full flex flex-col gap-6">
+      {isLLMDegraded && <DegradedBanner />}
+
       <div style={{ animationDelay: '0ms' }}>
         {discovery !== null ? (
           <RepoHeader repoInfo={discovery.repoInfo} />
@@ -780,6 +853,11 @@ export function AnalysisResult({
           <div style={{ animationDelay: '300ms' }}>
             <DiscoveryEntryPointsSection entryPoints={discovery.entryPoints} />
           </div>
+          {isLLMDegraded && (
+            <div style={{ animationDelay: '400ms' }}>
+              <LLMPlaceholderSection />
+            </div>
+          )}
         </>
       ) : (
         <>

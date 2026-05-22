@@ -8,6 +8,10 @@ interface AnalysisProgressProps {
   currentPhase: AnalysisPhase
   progress?: { current: number; total: number } | undefined
   message: string
+  // When true, the LLM portion of the analysis failed (e.g. Anthropic
+  // overload). Discovery is still considered 'done', but Analyze /
+  // Stack / Guide / Done are rendered as failed instead of success.
+  failed?: boolean
 }
 
 const PHASES: { phase: AnalysisPhase; label: string }[] = [
@@ -18,11 +22,22 @@ const PHASES: { phase: AnalysisPhase; label: string }[] = [
   { phase: 'complete', label: 'Done' },
 ]
 
+type StepState = 'done' | 'active' | 'pending' | 'failed'
+
 function getStepState(
   stepPhase: AnalysisPhase,
   currentPhase: AnalysisPhase,
   seenPhases: Set<AnalysisPhase>,
-): 'done' | 'active' | 'pending' {
+  failed: boolean,
+): StepState {
+  // In failed mode: Scan keeps 'done' (discovery actually ran), every
+  // downstream step renders as 'failed' so the user can see at a glance
+  // which part of the pipeline stopped. 'Done' must NOT show a success
+  // check in this state.
+  if (failed) {
+    if (stepPhase === 'discovery') return 'done'
+    return 'failed'
+  }
   if (currentPhase === 'complete' && stepPhase === 'complete') {
     return 'done'
   }
@@ -35,17 +50,24 @@ export function AnalysisProgress({
   seenPhases,
   currentPhase,
   message,
+  failed = false,
 }: AnalysisProgressProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2 py-1">
       <div className="flex items-start w-full">
         {PHASES.map((step, index) => {
-          const state = getStepState(step.phase, currentPhase, seenPhases)
+          const state = getStepState(step.phase, currentPhase, seenPhases, failed)
           const isLast = index === PHASES.length - 1
           const isActive = state === 'active'
           const isDone = state === 'done'
-          const connectorColor =
-            isDone || isActive ? 'bg-emerald-500/40' : 'bg-zinc-800'
+          const isFailed = state === 'failed'
+          // Connector takes the failed color when its left edge anchors a
+          // failed step, or when both endpoints belong to the failed run.
+          const connectorColor = isFailed
+            ? 'bg-amber-700/40'
+            : isDone || isActive
+              ? 'bg-emerald-500/40'
+              : 'bg-zinc-800'
 
           return (
             <Fragment key={step.phase}>
@@ -54,6 +76,7 @@ export function AnalysisProgress({
                   className={`h-4 w-4 rounded-full transition-all duration-150 flex items-center justify-center
                     ${isDone ? 'bg-emerald-500' : ''}
                     ${isActive ? 'bg-emerald-500 animate-pulse-subtle' : ''}
+                    ${isFailed ? 'bg-amber-900/60 border border-amber-700' : ''}
                     ${state === 'pending' ? 'bg-zinc-800 border border-zinc-700' : ''}
                   `}
                 >
@@ -77,11 +100,29 @@ export function AnalysisProgress({
                   {isActive && (
                     <div className="h-1.5 w-1.5 rounded-full bg-white" />
                   )}
+                  {isFailed && (
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 10 10"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M3 3L7 7M7 3L3 7"
+                        stroke="rgb(252 211 77)"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  )}
                 </div>
                 <span
                   className={`text-[10px] whitespace-nowrap transition-colors duration-150
                     ${isDone ? 'text-zinc-500' : ''}
                     ${isActive ? 'text-zinc-100 font-medium' : ''}
+                    ${isFailed ? 'text-amber-400' : ''}
                     ${state === 'pending' ? 'text-zinc-600' : ''}
                   `}
                 >
