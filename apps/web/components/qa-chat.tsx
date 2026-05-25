@@ -7,6 +7,7 @@ import type {
   QAResult,
 } from '@reponboard/agent-core'
 import { Button } from '@/components/ui/button'
+import { extractErrorMessage } from '@/lib/error-message'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -154,10 +155,9 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
 
         if (!response.ok) {
           const data: unknown = await response.json().catch(() => ({}))
-          const msg =
-            (data as { error?: string }).error ??
-            `Request failed (${response.status})`
-          setError(msg)
+          setError(
+            extractErrorMessage(data, `Request failed (${response.status})`),
+          )
           return
         }
 
@@ -625,7 +625,7 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
 
           {error !== null && (
             <p role="alert" className="text-sm text-red-400 py-2">
-              {error}
+              {typeof error === 'string' ? error : 'Something went wrong.'}
             </p>
           )}
 
