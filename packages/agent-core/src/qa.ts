@@ -235,6 +235,11 @@ export async function* answerQuestion(
     let iteration = 0
     let tokensIn = 0
     let tokensOut = 0
+    // Tracks whether the budget-exhausted anti-preamble nudge has
+    // already been injected into the conversation. Without this flag
+    // we would push the same instruction on every forced iteration
+    // (text-only retry loops) and accumulate duplicates in `messages`.
+    let forcedGuidanceInjected = false
 
     while (iteration < MAX_ITERATIONS) {
       iteration++
@@ -248,6 +253,26 @@ export async function* answerQuestion(
         console.log('[qa] forcing respond via tool_choice (budget exceeded)')
         if (telemetry !== undefined) {
           telemetry.toolBudgetExhausted = true
+        }
+        // Inject explicit anti-preamble guidance into the conversation
+        // once per turn. Forcing `tool_choice: 'respond'` makes the
+        // model call respond, but it doesn't constrain the *content*
+        // of respond.answer — under pressure the model often emits a
+        // transitional preamble ("let me look at the source code
+        // before answering") as the answer. Spelling out that there
+        // are NO more turns reduces that failure mode.
+        if (!forcedGuidanceInjected) {
+          messages.push({
+            role: 'user',
+            content:
+              'TOOL BUDGET EXHAUSTED. You have NO more turns. Call respond ' +
+              'NOW with whatever substance you already learned. Do NOT ' +
+              'announce next steps ("let me look at...", "I\'ll check...") ' +
+              'and do NOT say you will examine anything. If you genuinely ' +
+              'lack enough information to answer, say so plainly in one ' +
+              'sentence as respond.answer and stop.',
+          })
+          forcedGuidanceInjected = true
         }
       }
 
@@ -308,12 +333,19 @@ export async function* answerQuestion(
       )
 
       if (toolUses.length === 0) {
-        // Agent responded with text only — nudge toward respond
+        // Agent responded with text only — nudge toward respond. Spell
+        // out the anti-preamble guidance: under budget pressure the
+        // model sometimes emits "Let me look at..." as text instead of
+        // calling respond. Make explicit that there are no more turns.
         messages.push({ role: 'assistant', content: response.content })
         messages.push({
           role: 'user',
           content:
-            'Please call the respond tool now with your final answer.',
+            'Call the respond tool NOW with your final answer based on what ' +
+            'you already learned. Do NOT announce next steps or say you ' +
+            'will look at anything — there are no more turns. If you lack ' +
+            'the information to answer, say so plainly in respond.answer ' +
+            'and stop.',
         })
         continue
       }
