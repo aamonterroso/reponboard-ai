@@ -425,12 +425,20 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
               const reasonText =
                 validation.reason === 'hallucinated_file_references'
                   ? 'referenced files you did not fetch in this turn'
-                  : 'summarized previous answers instead of answering directly'
+                  : validation.reason === 'prospective_non_answer'
+                    ? 'announced a future action ("let me look at...") instead of answering'
+                    : 'summarized previous answers instead of answering directly'
+              const guidance =
+                validation.reason === 'prospective_non_answer'
+                  ? `You have NO more turns. Respond NOW with whatever you already learned. ` +
+                    `Do NOT say you will look at or examine anything — just answer with the substance you have. ` +
+                    `If you truly do not have enough information, say so plainly and stop.`
+                  : `Answer the current question fresh using ONLY files you actually fetch_file in this turn. ` +
+                    `Do not recapitulate prior context.`
               const hardenedQuestion =
                 `IMPORTANT: Your previous response was rejected because it ${reasonText}. ` +
-                `Answer the current question fresh using ONLY files you actually fetch_file in this turn. ` +
-                `Do not recapitulate prior context.\n\n` +
-                `Original question: ${parsed.question}`
+                guidance +
+                `\n\nOriginal question: ${parsed.question}`
 
               const retryTelemetry = telemetry === null ? undefined : telemetry
               const retryGenerator = answerQuestion(
