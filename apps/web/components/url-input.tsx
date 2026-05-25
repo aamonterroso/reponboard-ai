@@ -11,6 +11,7 @@ import type {
 } from '@reponboard/agent-core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { extractErrorMessage } from '@/lib/error-message'
 import { AnalysisResult } from './analysis-result'
 import { AnalysisProgress } from './analysis-progress'
 
@@ -77,9 +78,8 @@ export function UrlInput(): React.JSX.Element {
       })
 
       if (!response.ok) {
-        const data: unknown = await response.json()
-        const errorData = data as { error?: string }
-        setError(errorData.error ?? 'An unexpected error occurred.')
+        const data: unknown = await response.json().catch(() => ({}))
+        setError(extractErrorMessage(data, 'An unexpected error occurred.'))
         if (response.status === 429) {
           setRemaining(0)
         }
@@ -250,7 +250,7 @@ export function UrlInput(): React.JSX.Element {
         )}
         {error !== null && (
           <p role="alert" className="text-sm text-red-400 text-left">
-            {error}
+            {typeof error === 'string' ? error : 'Something went wrong.'}
           </p>
         )}
         <AnalysisResult
@@ -310,7 +310,7 @@ export function UrlInput(): React.JSX.Element {
 
       {error !== null && (
         <p role="alert" className="text-sm text-red-400 text-left">
-          {error}
+          {typeof error === 'string' ? error : 'Something went wrong.'}
         </p>
       )}
     </div>
