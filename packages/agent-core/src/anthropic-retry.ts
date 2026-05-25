@@ -2,11 +2,24 @@
 // 503 (unavailable), and network errors. Does NOT retry on 4xx (auth,
 // bad request) since those are not transient. Used at every SDK call
 // site in agent-core to keep a single source of truth for retry policy.
+//
+// Backoff: exponential with full jitter. wait = exp + uniform(0, exp),
+// capped at capDelayMs. With defaults (base=1000, factor=2, cap=8000),
+// waits are sampled from [1s,2s], [2s,4s], [4s,8s] across attempts.
 
 interface RetryOptions {
   maxAttempts?: number
   baseDelayMs?: number
+  factor?: number
+  capDelayMs?: number
+  jitter?: boolean
 }
+
+const DEFAULT_MAX_ATTEMPTS = 4
+const DEFAULT_BASE_DELAY_MS = 1000
+const DEFAULT_FACTOR = 2
+const DEFAULT_CAP_DELAY_MS = 8000
+const DEFAULT_JITTER = true
 
 function isRetryableError(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false
@@ -41,8 +54,11 @@ export async function withAnthropicRetry<T>(
   fn: () => Promise<T>,
   options?: RetryOptions,
 ): Promise<T> {
-  const maxAttempts = options?.maxAttempts ?? 3
-  const baseDelayMs = options?.baseDelayMs ?? 1000
+  const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+  const baseDelayMs = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
+  const factor = options?.factor ?? DEFAULT_FACTOR
+  const capDelayMs = options?.capDelayMs ?? DEFAULT_CAP_DELAY_MS
+  const useJitter = options?.jitter ?? DEFAULT_JITTER
   let lastError: unknown
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -53,9 +69,11 @@ export async function withAnthropicRetry<T>(
       if (attempt >= maxAttempts || !isRetryableError(err)) {
         throw err
       }
-      const delay = baseDelayMs * Math.pow(3, attempt - 1)
+      const exp = baseDelayMs * Math.pow(factor, attempt - 1)
+      const jitter = useJitter ? Math.random() * exp : 0
+      const delay = Math.min(exp + jitter, capDelayMs)
       console.warn(
-        `[anthropic-retry] attempt ${attempt}/${maxAttempts} failed; retrying in ${delay}ms`,
+        `[anthropic-retry] attempt ${attempt}/${maxAttempts} failed; retrying in ${Math.round(delay)}ms`,
       )
       await new Promise((r) => setTimeout(r, delay))
     }

@@ -47,8 +47,17 @@ function buildTreeSummary(tree: GitHubTreeNode[]): string {
   return filtered.join('\n')
 }
 
-const MAX_TOOL_CALLS = 3
-const MAX_ITERATIONS = MAX_TOOL_CALLS + 3
+// Hard cap on exploration tool calls (fetch_file + list_directory)
+// per QA turn. When the cap is hit, the next iteration is run with
+// tool_choice forced to 'respond' so the agent has to emit its final
+// answer from the context it has — instead of being cut off mid-walk
+// or returning an empty answer. Pattern mirrors `finish_*` forcing in
+// llm-analysis.ts.
+const QA_MAX_TOOL_CALLS = 4
+// One extra iteration headroom for the forced-respond turn plus a
+// small safety margin if the model returns text-only and has to be
+// re-prompted to call respond.
+const MAX_ITERATIONS = QA_MAX_TOOL_CALLS + 3
 
 // ─── Tool Schema ──────────────────────────────────────────────────────────────
 
@@ -230,6 +239,30 @@ export async function* answerQuestion(
     while (iteration < MAX_ITERATIONS) {
       iteration++
 
+      // When the exploration budget is exhausted, force the next call to
+      // emit `respond` via tool_choice. The model produces its final
+      // answer from already-fetched context rather than burning more
+      // tool calls. Mirrors llm-analysis.ts's `finish_*` forcing.
+      const isForced = toolCallCount >= QA_MAX_TOOL_CALLS
+      if (isForced) {
+        console.log('[qa] forcing respond via tool_choice (budget exceeded)')
+        if (telemetry !== undefined) {
+          telemetry.toolBudgetExhausted = true
+        }
+      }
+
+      // Parallel tool use is OFF on every call. With type:'auto' +
+      // disable_parallel_tool_use the model returns at most one tool_use
+      // per response; with type:'tool' it returns exactly one. This is
+      // what makes QA_MAX_TOOL_CALLS an actual hard cap on file fetches
+      // instead of just a trigger for the next iteration's forcing.
+      const toolChoice = isForced
+        ? ({ type: 'tool' as const, name: 'respond' } as const)
+        : ({
+            type: 'auto' as const,
+            disable_parallel_tool_use: true,
+          } as const)
+
       const response = await withAnthropicRetry(() =>
         client.messages.create({
           model,
@@ -237,6 +270,7 @@ export async function* answerQuestion(
           system,
           tools: QA_TOOLS,
           messages,
+          tool_choice: toolChoice,
         }),
       )
 
@@ -284,7 +318,6 @@ export async function* answerQuestion(
         continue
       }
 
-      const budgetExceeded = toolCallCount >= MAX_TOOL_CALLS
       const toolResults: Anthropic.ToolResultBlockParam[] = []
 
       for (const toolUse of toolUses) {
@@ -311,22 +344,13 @@ export async function* answerQuestion(
           toolInput: inp,
         }
 
-        let resultText: string
-        if (budgetExceeded) {
-          if (telemetry !== undefined) {
-            telemetry.toolBudgetExhausted = true
-          }
-          resultText =
-            'TOOL BUDGET EXHAUSTED. Call respond now with your best answer.'
-        } else {
-          resultText = await executeExplorationTool(
-            toolUse.name,
-            toolUse.input,
-            tree,
-            githubClient,
-            repoContext,
-          )
-        }
+        const resultText = await executeExplorationTool(
+          toolUse.name,
+          toolUse.input,
+          tree,
+          githubClient,
+          repoContext,
+        )
 
         yield {
           phase: 'tool_result',

@@ -218,9 +218,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   telemetry.classifierDegradedMode = classifyResult.degradedMode
 
   const { classification, confidence } = classifyResult.result
+  // Shortcut paths only fire on a CONFIDENT classifier response. When
+  // the classifier is degraded it now returns on_topic with confidence 0
+  // (fail-open) — that path falls through to the main QA agent below
+  // rather than rejecting the user.
   const isOffTopicShortcut =
-    classification === 'off_topic' &&
-    (confidence > 0.7 || classifyResult.degradedMode)
+    classification === 'off_topic' && confidence > 0.7
   const isClarificationShortcut =
     classification === 'needs_clarification' &&
     confidence > 0.7 &&

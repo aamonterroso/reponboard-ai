@@ -33,14 +33,14 @@ beforeEach(() => {
 })
 
 describe('classifyQuestion', () => {
-  it('returns degraded fail-open when SDK throws', async () => {
+  it('returns degraded fail-open (on_topic, confidence 0) when SDK throws', async () => {
     mockCreate.mockRejectedValueOnce(new Error('network error'))
 
     const output = await classifyQuestion(BASE_INPUT)
 
     expect(output.degradedMode).toBe(true)
     expect(output.result.classification).toBe('on_topic')
-    expect(output.result.confidence).toBe(0.5)
+    expect(output.result.confidence).toBe(0)
     expect(output.costUsd).toBe(0)
   })
 
@@ -51,7 +51,7 @@ describe('classifyQuestion', () => {
 
     expect(output.degradedMode).toBe(true)
     expect(output.result.classification).toBe('on_topic')
-    expect(output.result.confidence).toBe(0.5)
+    expect(output.result.confidence).toBe(0)
     expect(output.costUsd).toBe(0)
   })
 
@@ -72,7 +72,7 @@ describe('classifyQuestion', () => {
     expect(output.costUsd).toBeGreaterThan(0)
   })
 
-  it('returns off_topic with suggestions array of length 3', async () => {
+  it('returns off_topic with suggestions array of length 3 (real classifier verdict)', async () => {
     const json = JSON.stringify({
       classification: 'off_topic',
       confidence: 0.9,
@@ -126,7 +126,27 @@ describe('classifyQuestion', () => {
     expect(mockCreate).toHaveBeenCalledTimes(2)
   })
 
-  it('fails closed to off_topic when classifier dies AND question matches "best ... in 20XX"', async () => {
+  it('total classifier failure → on_topic + confidence=0 + degradedMode=true (fail-OPEN, NOT off_topic)', async () => {
+    // Simulate the exact demo scenario: Anthropic API returns 529 for
+    // every classifier attempt. The classifier must NOT reject the user;
+    // it must hand the question to the main QA agent.
+    mockCreate.mockRejectedValue({ status: 529, message: 'overloaded' })
+
+    const output = await classifyQuestion(BASE_INPUT)
+
+    expect(output.degradedMode).toBe(true)
+    expect(output.result.classification).toBe('on_topic')
+    expect(output.result.confidence).toBe(0)
+    // Critical: the degraded path must NEVER produce off_topic, even on
+    // questions that previously matched the off-topic heuristics.
+    expect(output.result.classification).not.toBe('off_topic')
+    expect(output.costUsd).toBe(0)
+  })
+
+  it('fails OPEN to on_topic even when question previously would have matched off-topic heuristics', async () => {
+    // Pre-change, "best ... in 20XX" + classifier failure produced
+    // off_topic via fail-closed heuristic. Post-change there are no
+    // heuristics — every degraded path is on_topic with confidence 0.
     mockCreate.mockRejectedValue({ status: 529, message: 'overloaded' })
 
     const output = await classifyQuestion({
@@ -135,23 +155,13 @@ describe('classifyQuestion', () => {
     })
 
     expect(output.degradedMode).toBe(true)
-    expect(output.result.classification).toBe('off_topic')
-    expect(output.result.confidence).toBe(0.5)
-    expect(output.result.suggestions).toEqual([])
+    expect(output.result.classification).toBe('on_topic')
+    expect(output.result.confidence).toBe(0)
+    expect(output.result.suggestions).toBeUndefined()
     expect(output.costUsd).toBe(0)
   })
 
-  it('fails closed to off_topic on "top N ... platform" pattern', async () => {
-    mockCreate.mockRejectedValue({ status: 503 })
-    const output = await classifyQuestion({
-      ...BASE_INPUT,
-      question: 'What are the top 5 deployment platforms in 2026?',
-    })
-    expect(output.degradedMode).toBe(true)
-    expect(output.result.classification).toBe('off_topic')
-  })
-
-  it('fails open to on_topic when classifier dies and question has no heuristic match', async () => {
+  it('fails OPEN to on_topic on a question without any heuristic match', async () => {
     mockCreate.mockRejectedValue({ status: 529 })
     const output = await classifyQuestion({
       ...BASE_INPUT,
@@ -159,6 +169,6 @@ describe('classifyQuestion', () => {
     })
     expect(output.degradedMode).toBe(true)
     expect(output.result.classification).toBe('on_topic')
-    expect(output.result.confidence).toBe(0.5)
+    expect(output.result.confidence).toBe(0)
   })
 })

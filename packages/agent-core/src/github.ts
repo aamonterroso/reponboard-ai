@@ -66,9 +66,13 @@ export function parseGitHubUrl(url: string): ParsedGitHubUrl {
     return { owner, repo, branch }
   }
 
-  // Match plain repo URLs (with or without .git, trailing slashes, fragments)
+  // Match plain repo URLs (with or without .git, trailing slashes, fragments).
+  // The repo capture allows dots so names like `next.js`, `vue.js`, or
+  // `react-three.fiber` parse correctly. The non-greedy quantifier + the
+  // explicit `\.git` boundary lets the regex strip a trailing `.git`
+  // without eating dots in the middle of the repo name.
   const repoMatch =
-    /^(?:https?:\/\/)?github\.com\/([^/\s]+)\/([^/\s.]+?)(?:\.git)?(?:[/?#].*)?$/.exec(trimmed)
+    /^(?:https?:\/\/)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:[/?#].*)?$/.exec(trimmed)
   if (repoMatch !== null) {
     const owner = repoMatch[1]
     const repo = repoMatch[2]

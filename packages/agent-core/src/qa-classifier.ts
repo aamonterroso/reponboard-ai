@@ -47,44 +47,19 @@ Include the "suggestions" field ONLY when classification is
 specific repository that the user might ask instead. Omit the field
 entirely for on_topic and needs_clarification.`
 
+// Fail-OPEN degraded result: when the classifier itself cannot run
+// (network/upstream failure, timeout, malformed JSON), we let the
+// question through to the main QA agent rather than rejecting the user.
+// The main agent has its own SCOPE INVARIANT guardrail. The classifier
+// is only a cost optimization, not the single line of defense.
 const FAIL_OPEN_RESULT: ClassificationResult = {
   classification: 'on_topic',
-  confidence: 0.5,
-  reasoning: 'Classifier unavailable; defaulting to on_topic (fail-open).',
+  confidence: 0,
+  reasoning:
+    'Classifier unavailable; falling through to main QA agent (fail-open). The main agent enforces repo-scope on its own.',
 }
 
-const OFF_TOPIC_HEURISTICS: RegExp[] = [
-  /\bin 20\d\d\b/i,
-  /\bbest\b/i,
-  /\brecommend/i,
-  /\bcompare/i,
-  /\s+vs\s+/i,
-  /\s+versus\s+/i,
-  /\btop \d+\b/i,
-  /\bindustry\b/i,
-  /\bplatform\b/i,
-  /\bframework for\b/i,
-]
-
-function matchesOffTopicHeuristic(question: string): boolean {
-  return OFF_TOPIC_HEURISTICS.some((re) => re.test(question))
-}
-
-function makeDegradedResult(question: string, latencyMs: number): ClassifyOutput {
-  if (matchesOffTopicHeuristic(question)) {
-    return {
-      result: {
-        classification: 'off_topic',
-        confidence: 0.5,
-        reasoning:
-          'Classifier unavailable; question matched off-topic heuristic patterns. Defaulting to off_topic to avoid unbounded LLM cost on likely-off-topic query.',
-        suggestions: [],
-      },
-      latencyMs,
-      degradedMode: true,
-      costUsd: 0,
-    }
-  }
+function makeDegradedResult(latencyMs: number): ClassifyOutput {
   return { result: FAIL_OPEN_RESULT, latencyMs, degradedMode: true, costUsd: 0 }
 }
 
@@ -179,7 +154,7 @@ export async function classifyQuestion(input: {
 
     if (parsed === null) {
       console.error('[qa-classifier]', 'Failed to parse classifier response:', text)
-      return makeDegradedResult(input.question, latencyMs)
+      return makeDegradedResult(latencyMs)
     }
 
     const costUsd = calculateCost(
@@ -197,6 +172,6 @@ export async function classifyQuestion(input: {
   } catch (err) {
     const latencyMs = Date.now() - t0
     console.error('[qa-classifier]', err)
-    return makeDegradedResult(input.question, latencyMs)
+    return makeDegradedResult(latencyMs)
   }
 }
