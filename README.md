@@ -7,7 +7,7 @@ The codebase tour you never got.
 [![Live Demo](https://img.shields.io/badge/Live_Demo-reponboard--ai.vercel.app-blue?style=for-the-badge)](https://reponboard-ai.vercel.app)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-![reponboard-ai screenshot](docs/hero.png)
+![reponboard-ai analyzing a repository](docs/reponboard.gif)
 
 ---
 
@@ -106,8 +106,10 @@ GitHub URL
 
 A canonical benchmark (Block G, N=40) compared Haiku 4.5 and Sonnet 4 on this exact pipeline across two reference repos: `colinhacks/zod` and `pallets/flask`. Methodology documented in [BENCHMARK_NOTES.md](BENCHMARK_NOTES.md) at repo root. Results frozen as of May 2026 under `benchmark-results/block-g-final-canonical/`.
 
+![Benchmark table: Haiku vs Sonnet p50 latency, cost, and truncation rate across zod and flask (N=40)](docs/benchmark-table.png)
+
 Headline findings:
-- Sonnet/Haiku speed ratio: **1.5–1.8×** in practice (advertised 4-5× ratio does not hold for this workload)
+- Sonnet/Haiku speed ratio: **1.6–2.1×** in practice (advertised 4-5× ratio does not hold for this workload)
 - Cost ratio: **~3.0×** (Sonnet expectedly more expensive)
 - Truncation rate: Sonnet truncates more often (**40%**) than Haiku (**20%**), despite making fewer tool calls overall. Defensive coercion in the codebase is therefore a feature, not a workaround.
 
