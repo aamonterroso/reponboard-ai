@@ -8,7 +8,7 @@ import {
   type LLMModelIntent,
 } from './llm-analysis'
 import { calculateCost } from './pricing'
-import { withAnthropicRetry } from './anthropic-retry'
+import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 import type { QaTelemetry } from './qa-telemetry'
 import type {
   GitHubTreeNode,
@@ -58,6 +58,25 @@ const QA_MAX_TOOL_CALLS = 4
 // small safety margin if the model returns text-only and has to be
 // re-prompted to call respond.
 const MAX_ITERATIONS = QA_MAX_TOOL_CALLS + 3
+
+// Folds guidance text into the trailing user turn instead of pushing a
+// second consecutive user message after a tool_result turn.
+export function appendUserText(
+  messages: Anthropic.MessageParam[],
+  text: string,
+): void {
+  const last = messages[messages.length - 1]
+  if (last === undefined || last.role !== 'user') {
+    messages.push({ role: 'user', content: text })
+    return
+  }
+  const blocks: Anthropic.ContentBlockParam[] =
+    typeof last.content === 'string'
+      ? [{ type: 'text', text: last.content }]
+      : [...last.content]
+  blocks.push({ type: 'text', text })
+  last.content = blocks
+}
 
 // ─── Tool Schema ──────────────────────────────────────────────────────────────
 
@@ -199,7 +218,7 @@ export async function* answerQuestion(
   telemetry?: QaTelemetry,
 ): AsyncGenerator<QAProgressEvent> {
   try {
-    const client = new Anthropic({ apiKey: anthropicApiKey })
+    const client = new Anthropic({ apiKey: anthropicApiKey, timeout: ANTHROPIC_TIMEOUT_MS })
     const githubClient = new GitHubClient(githubToken)
     const resolvedIntent: LLMModelIntent =
       intent ?? (mode === 'development' ? 'fast' : 'quality')
@@ -240,6 +259,7 @@ export async function* answerQuestion(
     // we would push the same instruction on every forced iteration
     // (text-only retry loops) and accumulate duplicates in `messages`.
     let forcedGuidanceInjected = false
+    let emptyAnswerRetried = false
 
     while (iteration < MAX_ITERATIONS) {
       iteration++
@@ -262,16 +282,15 @@ export async function* answerQuestion(
         // before answering") as the answer. Spelling out that there
         // are NO more turns reduces that failure mode.
         if (!forcedGuidanceInjected) {
-          messages.push({
-            role: 'user',
-            content:
-              'TOOL BUDGET EXHAUSTED. You have NO more turns. Call respond ' +
+          appendUserText(
+            messages,
+            'TOOL BUDGET EXHAUSTED. You have NO more turns. Call respond ' +
               'NOW with whatever substance you already learned. Do NOT ' +
               'announce next steps ("let me look at...", "I\'ll check...") ' +
               'and do NOT say you will examine anything. If you genuinely ' +
               'lack enough information to answer, say so plainly in one ' +
               'sentence as respond.answer and stop.',
-          })
+          )
           forcedGuidanceInjected = true
         }
       }
@@ -317,8 +336,39 @@ export async function* answerQuestion(
               (f): f is string => typeof f === 'string',
             )
           : []
+        const answer = typeof input.answer === 'string' ? input.answer.trim() : ''
+
+        // A forced `respond` can arrive with an empty or missing answer
+        // when the model burned its budget without learning anything
+        // useful. Give it one corrective turn; if it still comes back
+        // empty, fall through to the canned fallback below instead of
+        // shipping a blank bubble to the UI.
+        if (answer === '') {
+          if (emptyAnswerRetried) break
+          emptyAnswerRetried = true
+          if (telemetry !== undefined) {
+            telemetry.emptyAnswerRetried = true
+          }
+          messages.push({ role: 'assistant', content: response.content })
+          messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: respondBlock.id,
+                is_error: true,
+                content:
+                  'respond.answer was empty. Call respond again with a ' +
+                  'non-empty answer built from what you already learned. ' +
+                  'If you cannot answer, say so plainly in one sentence.',
+              },
+            ],
+          })
+          continue
+        }
+
         const result: QAResult = {
-          answer: typeof input.answer === 'string' ? input.answer : '',
+          answer,
           // Dedupe in case the LLM repeats file paths — avoids React
           // duplicate-key warnings in the chat UI.
           filesReferenced: Array.from(new Set(rawFiles)),
@@ -401,7 +451,8 @@ export async function* answerQuestion(
       messages.push({ role: 'user', content: toolResults })
     }
 
-    // Safety fallback: agent never called respond() within the iteration cap.
+    // Safety fallback: agent never called respond() with a usable answer
+    // within the iteration cap.
     // Emit a graceful complete event so the UI shows a message rather than
     // surfacing a raw error to the user. Still report the cost so the
     // shared daily budget cap reflects what was actually spent.

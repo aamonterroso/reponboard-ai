@@ -10,6 +10,7 @@ export interface QaTelemetry {
   classifierDegradedMode: boolean
   toolCallsUsed: number
   toolBudgetExhausted: boolean
+  emptyAnswerRetried: boolean
   hallucinatedFileReferences: string[]
   responseRejectedByValidator: boolean
   retryCount: number
@@ -55,6 +56,7 @@ export function buildInitialTelemetry(input: {
     classifierDegradedMode: false,
     toolCallsUsed: 0,
     toolBudgetExhausted: false,
+    emptyAnswerRetried: false,
     hallucinatedFileReferences: [],
     responseRejectedByValidator: false,
     retryCount: 0,

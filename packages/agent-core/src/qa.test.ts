@@ -228,4 +228,102 @@ describe('answerQuestion — QA_MAX_TOOL_CALLS budget', () => {
     expect(telemetry.toolBudgetExhausted).toBe(false)
     expect(telemetry.toolCallsUsed).toBe(2)
   })
+
+  it('folds budget-exhausted guidance into the tool_result turn (no consecutive user messages)', async () => {
+    mockCreate
+      .mockResolvedValueOnce(fetchFileResponse('t1', 'src/a.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t2', 'src/b.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t3', 'src/c.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t4', 'src/d.ts'))
+      .mockResolvedValueOnce(respondResponse('Final answer.', ['src/a.ts']))
+
+    await drain(runQa('Trace the request lifecycle.'))
+
+    const forced = mockCreate.mock.calls[4]?.[0] as {
+      messages: Array<{ role: string }>
+    }
+    const roles = forced.messages.map((m) => m.role)
+    for (let i = 1; i < roles.length; i++) {
+      expect(roles[i] === 'user' && roles[i - 1] === 'user').toBe(false)
+    }
+  })
 })
+
+describe('answerQuestion — empty respond.answer recovery', () => {
+  it('retries once with an is_error tool_result when respond.answer is empty', async () => {
+    mockCreate
+      .mockResolvedValueOnce(respondResponse('   ', []))
+      .mockResolvedValueOnce(respondResponse('Recovered answer.', []))
+
+    const telemetry = buildTelemetry('empty-1')
+    const events = await drain(runQa('What does a.ts do?', telemetry))
+
+    expect(mockCreate).toHaveBeenCalledTimes(2)
+    const retry = mockCreate.mock.calls[1]?.[0] as {
+      messages: Array<{ role: string; content: unknown }>
+    }
+    const last = retry.messages[retry.messages.length - 1]
+    expect(last?.role).toBe('user')
+    expect(last?.content).toEqual([
+      expect.objectContaining({
+        type: 'tool_result',
+        tool_use_id: 'respond-1',
+        is_error: true,
+      }),
+    ])
+    expect(completeAnswer(events)).toBe('Recovered answer.')
+    expect(telemetry.emptyAnswerRetried).toBe(true)
+  })
+
+  it('falls back to a canned answer when respond.answer is empty twice', async () => {
+    mockCreate
+      .mockResolvedValueOnce(respondResponse('', []))
+      .mockResolvedValueOnce(respondResponse('', []))
+
+    const events = await drain(runQa('What does a.ts do?'))
+
+    expect(mockCreate).toHaveBeenCalledTimes(2)
+    const answer = completeAnswer(events)
+    expect(answer).not.toBe('')
+    expect(answer).toContain("didn't find what I needed")
+  })
+})
+
+function buildTelemetry(requestId: string) {
+  return buildInitialTelemetry({
+    requestId,
+    repoUrl: 'https://github.com/example/repo',
+    question: 'q',
+    historyLength: 0,
+  })
+}
+
+function runQa(question: string, telemetry = buildTelemetry('req')) {
+  return answerQuestion(
+    question,
+    { owner: 'example', repo: 'repo', branch: 'main' },
+    'ctx',
+    [],
+    'test-api-key',
+    undefined,
+    'production',
+    'fast',
+    telemetry,
+  )
+}
+
+async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
+  const events: unknown[] = []
+  for await (const ev of gen) events.push(ev)
+  return events
+}
+
+function completeAnswer(events: unknown[]): string | undefined {
+  const complete = events.find(
+    (e): e is { phase: 'complete'; result: { answer: string } } =>
+      typeof e === 'object' &&
+      e !== null &&
+      (e as { phase?: string }).phase === 'complete',
+  )
+  return complete?.result.answer
+}

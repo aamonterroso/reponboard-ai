@@ -7,6 +7,11 @@
 // capped at capDelayMs. With defaults (base=1000, factor=2, cap=8000),
 // waits are sampled from [1s,2s], [2s,4s], [4s,8s] across attempts.
 
+// Per-call SDK timeout, passed as `new Anthropic({ timeout })` at every
+// client construction site. Converts socket hangs into retryable
+// connection errors instead of unbounded waits.
+export const ANTHROPIC_TIMEOUT_MS = 60_000
+
 interface RetryOptions {
   maxAttempts?: number
   baseDelayMs?: number

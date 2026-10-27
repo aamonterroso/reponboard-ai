@@ -43,6 +43,46 @@ if (UPSTASH_TOKEN === undefined || UPSTASH_TOKEN === '') {
 
 const redis = new Redis({ url: UPSTASH_URL, token: UPSTASH_TOKEN })
 
+// Thrown when Upstash cannot serve a command. An archived or throttled
+// database answers HTTP 200 with an `{error: ...}` body, which the SDK
+// surfaces as an opaque TypeError (e.g. `h.map is not a function`) deep
+// inside command deserialization. Callers map this to a 503 instead of
+// letting it escape as Next's static 500 page.
+export class RateLimitUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Rate limiter unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+    )
+    this.name = 'RateLimitUnavailableError'
+  }
+}
+
+export const RATE_LIMITER_UNAVAILABLE_MESSAGE =
+  'Demo temporarily unavailable. Please try again in a few minutes.'
+
+async function withRedis<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op()
+  } catch (err) {
+    console.error('[rate-limit] Redis command failed', err)
+    throw new RateLimitUnavailableError(err)
+  }
+}
+
+async function mgetCounters(
+  keys: [string, string, string],
+): Promise<Array<string | number | null>> {
+  const values = await withRedis(() =>
+    redis.mget<Array<string | number | null>>(...keys),
+  )
+  if (!Array.isArray(values)) {
+    throw new RateLimitUnavailableError(
+      `MGET returned ${typeof values}, expected array`,
+    )
+  }
+  return values
+}
+
 export const ANALYZE_GLOBAL_DAILY_LIMIT = 30
 export const ANALYZE_PER_IP_DAILY_LIMIT = 3
 export const QA_GLOBAL_DAILY_LIMIT = 120
@@ -114,9 +154,11 @@ export async function checkRateLimit(
   scope: RateLimitScope,
 ): Promise<RateLimitResult> {
   const { global: globalKey, ip: ipKey, budget: budgetKey } = keysFor(scope, ip)
-  const [budgetRaw, globalRaw, ipRaw] = await redis.mget<
-    Array<string | number | null>
-  >(budgetKey, globalKey, ipKey)
+  const [budgetRaw, globalRaw, ipRaw] = await mgetCounters([
+    budgetKey,
+    globalKey,
+    ipKey,
+  ])
 
   const budgetSpent = toNumber(budgetRaw)
   const globalUsed = toNumber(globalRaw)
@@ -174,7 +216,7 @@ export async function recordRequestStart(
   pipeline.expire(globalKey, ttl, 'NX')
   pipeline.incr(ipKey)
   pipeline.expire(ipKey, ttl, 'NX')
-  await pipeline.exec()
+  await withRedis(() => pipeline.exec())
 }
 
 export async function recordAnalysisCost(costUsd: number): Promise<void> {
@@ -184,7 +226,7 @@ export async function recordAnalysisCost(costUsd: number): Promise<void> {
   const pipeline = redis.pipeline()
   pipeline.incrbyfloat(budgetKey, costUsd)
   pipeline.expire(budgetKey, ttl, 'NX')
-  await pipeline.exec()
+  await withRedis(() => pipeline.exec())
 }
 
 // Peek-only counter read for the /api/remaining endpoint that powers
@@ -198,9 +240,11 @@ export async function getRemainingForScope(
   budgetRemainingUsd: number
 }> {
   const { global: globalKey, ip: ipKey, budget: budgetKey } = keysFor(scope, ip)
-  const [budgetRaw, globalRaw, ipRaw] = await redis.mget<
-    Array<string | number | null>
-  >(budgetKey, globalKey, ipKey)
+  const [budgetRaw, globalRaw, ipRaw] = await mgetCounters([
+    budgetKey,
+    globalKey,
+    ipKey,
+  ])
   const { global: globalLimit, perIp: ipLimit } = limitsFor(scope)
   return {
     globalRemaining: Math.max(0, globalLimit - toNumber(globalRaw)),
@@ -256,7 +300,14 @@ export async function __resetRateLimitForTesting(options?: {
   }
 
   if (keys.length > 0) {
-    await redis.del(...keys)
+    await withRedis(() => redis.del(...keys))
   }
   return { deleted: keys }
+}
+
+// Upstash archives databases with no traffic for a long stretch, which
+// took production down on 2026-10-26. A daily cron write keeps this one
+// active even when nobody visits the demo.
+export async function touchKeepalive(): Promise<void> {
+  await withRedis(() => redis.set(prefixKey('keepalive'), new Date().toISOString()))
 }

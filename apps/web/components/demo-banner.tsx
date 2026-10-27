@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from 'react'
 
+// Fields are null when the rate limiter is unavailable.
 interface RemainingResponse {
-  remaining: number
-  globalRemaining: number
-  ipRemaining: number
+  remaining: number | null
+  globalRemaining: number | null
+  ipRemaining: number | null
 }
 
 // Demo banner that reports today's live rate-limit headroom. Renders as a

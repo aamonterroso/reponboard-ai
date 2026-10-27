@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { calculateCost } from './pricing'
-import { withAnthropicRetry } from './anthropic-retry'
+import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 
 export interface ClassificationResult {
   classification: 'on_topic' | 'off_topic' | 'needs_clarification'
@@ -128,7 +128,7 @@ export async function classifyQuestion(input: {
   userMessage += `\nQuestion: ${input.question}`
 
   try {
-    const client = new Anthropic({ apiKey: input.anthropicApiKey })
+    const client = new Anthropic({ apiKey: input.anthropicApiKey, timeout: ANTHROPIC_TIMEOUT_MS })
 
     const response = await withAnthropicRetry(
       () =>

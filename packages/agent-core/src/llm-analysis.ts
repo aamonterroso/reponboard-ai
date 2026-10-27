@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
 import { calculateCost } from './pricing'
-import { withAnthropicRetry } from './anthropic-retry'
+import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 import type {
   AnalysisMeta,
   ArchitectureInsights,
@@ -1057,7 +1057,7 @@ export async function* analyzeWithLLMStream(
   mode: LLMMode = 'production',
   intent?: LLMModelIntent,
 ): AsyncGenerator<LLMStreamEvent> {
-  const client = new Anthropic({ apiKey })
+  const client = new Anthropic({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS })
   const resolvedIntent: LLMModelIntent =
     intent ?? (mode === 'development' ? 'fast' : 'quality')
   const model = INTENT_TO_MODEL[resolvedIntent]

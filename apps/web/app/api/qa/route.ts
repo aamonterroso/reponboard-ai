@@ -1,4 +1,4 @@
-export const runtime = 'edge'
+export const maxDuration = 300
 
 import { NextResponse } from 'next/server'
 import {
@@ -15,16 +15,17 @@ import {
 } from '@reponboard/agent-core'
 import {
   checkRateLimit,
+  RATE_LIMITER_UNAVAILABLE_MESSAGE,
+  RateLimitUnavailableError,
   recordAnalysisCost,
   recordRequestStart,
 } from '@/lib/rate-limit'
+import type { RateLimitResult } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
-// Code-level cap on the analysis. Verified empirically that
-// Vercel Edge on the Hobby plan supports up to ~300s when the
-// response is streamed (test endpoint /timeout-test ran 89.91s
-// to completion). 120s gives Sonnet enough headroom for large
-// repos while still bounding worst-case behavior.
+// Code-level cap on the analysis, well under the 300s maxDuration of
+// the Node.js (Fluid Compute) function. 120s gives Sonnet enough
+// headroom for large repos while still bounding worst-case behavior.
 const TIMEOUT_MS = 120_000
 const MAX_QUESTION_LEN = 500
 const MAX_HISTORY_ITEMS = 20
@@ -152,7 +153,20 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   // the slot is reserved even on stream abort; the shared daily budget
   // cap is charged only after a successful 'complete' event.
   const ip = getClientIp(request)
-  const rateLimit = await checkRateLimit(ip, 'qa')
+  // Fail closed when Redis is unreachable: the daily budget cap lives
+  // there, so serving without it would leave LLM spend uncapped.
+  let rateLimit: RateLimitResult
+  try {
+    rateLimit = await checkRateLimit(ip, 'qa')
+    if (rateLimit.allowed) await recordRequestStart(ip, 'qa')
+  } catch (err) {
+    if (!(err instanceof RateLimitUnavailableError)) throw err
+    emit()
+    return NextResponse.json(
+      { error: RATE_LIMITER_UNAVAILABLE_MESSAGE, reason: 'rate_limiter_unavailable' },
+      { status: 503 },
+    )
+  }
   if (!rateLimit.allowed) {
     const message =
       rateLimit.reason === 'budget_exceeded'
@@ -166,7 +180,6 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       { status: 429 },
     )
   }
-  await recordRequestStart(ip, 'qa')
 
   let owner: string
   let repo: string

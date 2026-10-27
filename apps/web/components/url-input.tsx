@@ -43,7 +43,7 @@ export function UrlInput(): React.JSX.Element {
   useEffect(() => {
     void fetch('/api/remaining')
       .then((r) => r.json())
-      .then((data: { remaining: number }) => {
+      .then((data: { remaining: number | null }) => {
         setRemaining(data.remaining)
       })
       .catch(() => undefined)
@@ -229,7 +229,7 @@ export function UrlInput(): React.JSX.Element {
     setStreamMessage('')
     void fetch('/api/remaining')
       .then((r) => r.json())
-      .then((data: { remaining: number }) => {
+      .then((data: { remaining: number | null }) => {
         setRemaining(data.remaining)
       })
       .catch(() => undefined)
