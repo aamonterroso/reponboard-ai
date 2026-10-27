@@ -29,7 +29,7 @@ Paste a GitHub URL → Get an instant breakdown:
 
 **[https://reponboard-ai.vercel.app](https://reponboard-ai.vercel.app)**
 
-> The demo is rate-limited to **5 analyses/day globally** and **3/day per IP** to keep hosting free. If you hit the limit, check back tomorrow or run it locally with your own API key.
+> The demo is rate-limited to **30 analyses/day globally** and **3/day per IP** to keep hosting free. If you hit the limit, check back tomorrow or run it locally with your own API key.
 
 ---
 
@@ -121,7 +121,7 @@ The pipeline is benchmarked on a fixed protocol: `colinhacks/zod` and `pallets/f
 | flask · quality | 67.5s → **23.2s** | $0.135 → **$0.048** | 40% → **0%** |
 
 Headline findings:
-- **2–3× faster on the quality tier, 58–95% cheaper**, with 40/40 successful runs (Block G: 38/40).
+- **~3× faster on the quality tier, 58–95% cheaper**, with 40/40 successful runs (Block G: 38/40).
 - **Truncation eliminated** — strict tool use guarantees the structured payload; Block G's "truncation" turned out to be the model dropping schema fields, not running out of tokens.
 - **64–88% of input tokens served from the prompt cache.**
 - **The quality tier is no longer the slow tier**: Sonnet 5.5 matches Haiku 5.5 on wall-clock because it explores less; the tiers now differ mainly on cost (~12–19×).

@@ -38,7 +38,7 @@ Total spend for the 40 runs: **$1.27**.
 |---|---|---|---|
 | zod fast | 46.8s → 26.7s (**−43%**) | $0.057 → $0.0059 (**−90%**) | 20% → 0% |
 | zod quality | 76.5s → 23.9s (**−69%**) | $0.167 → $0.070 (**−58%**) | 40% → 0% |
-| flask fast | 31.8s → 20.5s (**−36%**) | $0.048 → $0.0026 (**−95%**) | 20% → 0% |
+| flask fast | 31.8s → 20.5s (**−35%**) | $0.048 → $0.0026 (**−95%**) | 20% → 0% |
 | flask quality | 67.5s → 23.2s (**−66%**) | $0.135 → $0.048 (**−64%**) | 40% → 0% |
 
 Phase medians (core / guide): Sonnet went from 41–48s / 25–28s to
@@ -69,8 +69,9 @@ Phase medians (core / guide): Sonnet went from 41–48s / 25–28s to
    runs 2–10 start warmer than a first-time visitor. The cold first run of
    each batch landed close to the median (zod: 29.6s / $0.0066 fast, 24.4s
    / $0.069 quality; flask: 22.9s / $0.0040 fast, 24.4s / $0.070 quality),
-   so the effect on latency is small; on cost the cold run is up to ~45%
-   above the mean (flask quality).
+   so the effect on latency is small; on cost the cold run is up to ~56%
+   above the mean (flask fast; +45% flask quality, +12% zod fast, −2% zod
+   quality).
 2. **Not an ablation.** Model and harness changes landed together. The
    live AI Lab (per-call cache %, tool timings) is the place to attribute
    individual wins; a per-lever ablation is future work.

@@ -298,9 +298,13 @@ nulls. The analysis cache treats every failure as a miss.
 GitHub requests 15s (`AbortSignal.timeout`), Anthropic calls 60s (SDK
 `timeout`), benchmark runs 180s wall-clock, analysis route 120s.
 
-### Key Files Limit
+### Context budget
 
-`MAX_KEY_FILES_FOR_LLM = 12` — caps files sent to LLM to keep prompt manageable.
+`PREFETCH_FILE_LIMIT = 3` key files go to the orchestrator raw (first
+3000 chars each); the next `WORKER_FILE_LIMIT = 5` go to Haiku worker
+summaries. `fetch_file` returns at most `MAX_FILE_CHARS = 4000`. Tool
+budgets: `MAX_TOOL_CALLS_CORE = 4`, `MAX_TOOL_CALLS_GUIDE = 3` (shared
+counter), `QA_MAX_TOOL_CALLS = 4`.
 
 ## Current Status
 
