@@ -39,6 +39,9 @@ interface GroupStats {
   costTotal: number
   truncationRate: number
   avgToolCalls: number
+  // Share of input tokens served from the prompt cache. Null for runs
+  // recorded before caching existed (Block G).
+  cacheHitRate: number | null
 }
 
 function computeStats(records: BenchmarkRecord[]): GroupStats {
@@ -51,6 +54,14 @@ function computeStats(records: BenchmarkRecord[]): GroupStats {
   ).length
   const toolCalls = records.map(
     (r) => (r.core?.toolCallCount ?? 0) + (r.guide?.toolCallCount ?? 0),
+  )
+
+  const phases = records.flatMap((r) => [r.core, r.guide]).filter((m) => m !== null)
+  const hasCacheData = phases.some((m) => m.cacheReadTokens !== undefined)
+  const cacheRead = phases.reduce((n, m) => n + (m.cacheReadTokens ?? 0), 0)
+  const totalInput = phases.reduce(
+    (n, m) => n + m.tokensIn + (m.cacheReadTokens ?? 0) + (m.cacheWriteTokens ?? 0),
+    0,
   )
 
   return {
@@ -66,6 +77,7 @@ function computeStats(records: BenchmarkRecord[]): GroupStats {
     costTotal: costs.reduce((a, b) => a + b, 0),
     truncationRate: count > 0 ? truncated / count : 0,
     avgToolCalls: mean(toolCalls),
+    cacheHitRate: hasCacheData && totalInput > 0 ? cacheRead / totalInput : null,
   }
 }
 
@@ -119,10 +131,10 @@ function main(): void {
 
   console.log('# Benchmark Summary\n')
   console.log(
-    '| Repo | Intent | N | Success | Latency p50 | p95 | Mean | Min | Max | Cost mean | Cost total | Truncation | Avg tool calls |',
+    '| Repo | Intent | N | Success | Latency p50 | p95 | Mean | Min | Max | Cost mean | Cost total | Truncation | Avg tool calls | Cache hit |',
   )
   console.log(
-    '|------|--------|---|---------|-------------|-----|------|-----|-----|-----------|------------|------------|----------------|',
+    '|------|--------|---|---------|-------------|-----|------|-----|-----|-----------|------------|------------|----------------|-----------|',
   )
 
   const sortedKeys = Array.from(groups.keys()).sort()
@@ -130,7 +142,7 @@ function main(): void {
     const [repo, intent] = key.split('|')
     const stats = computeStats(groups.get(key) ?? [])
     console.log(
-      `| ${repo} | ${intent} | ${stats.count} | ${fmtPct(stats.successRate)} | ${stats.latencyP50}ms | ${stats.latencyP95}ms | ${stats.latencyMean}ms | ${stats.latencyMin}ms | ${stats.latencyMax}ms | ${fmtUsd(stats.costMean)} | ${fmtUsd(stats.costTotal)} | ${fmtPct(stats.truncationRate)} | ${stats.avgToolCalls.toFixed(1)} |`,
+      `| ${repo} | ${intent} | ${stats.count} | ${fmtPct(stats.successRate)} | ${stats.latencyP50}ms | ${stats.latencyP95}ms | ${stats.latencyMean}ms | ${stats.latencyMin}ms | ${stats.latencyMax}ms | ${fmtUsd(stats.costMean)} | ${fmtUsd(stats.costTotal)} | ${fmtPct(stats.truncationRate)} | ${stats.avgToolCalls.toFixed(1)} | ${stats.cacheHitRate === null ? 'n/a' : fmtPct(stats.cacheHitRate)} |`,
     )
   }
 }

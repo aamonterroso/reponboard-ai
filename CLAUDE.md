@@ -20,17 +20,29 @@ reponboard-ai/
 │       │   ├── globals.css        # Global styles + Tailwind
 │       │   └── api/
 │       │       ├── analyze/
-│       │       │   └── route.ts   # Main analysis API (streaming NDJSON)
+│       │       │   └── route.ts   # Main analysis API (SSE) + repo@SHA cache
 │       │       ├── qa/
-│       │       │   └── route.ts   # Streaming NDJSON Q&A endpoint with
+│       │       │   └── route.ts   # Streaming SSE Q&A endpoint with
 │       │       │                  # classifier pre-flight, validator post-hoc,
 │       │       │                  # telemetry emission
-│       │       └── remaining/
-│       │           └── route.ts   # GET endpoint for daily quota remaining
+│       │       ├── remaining/
+│       │       │   └── route.ts   # GET endpoint for daily quota remaining
+│       │       └── keepalive/
+│       │           └── route.ts   # Daily Vercel cron (CRON_SECRET) that keeps
+│       │                          # the Upstash DB from being archived
+│       ├── hooks/
+│       │   └── use-analysis-stream.ts # Owns the /api/analyze SSE request
+│       ├── lib/
+│       │   ├── sse.ts             # Server SSE writer (ids, heartbeat)
+│       │   ├── sse-client.ts      # POST-friendly SSE reader (eventsource-parser)
+│       │   ├── analysis-stream.ts # Pure reducer: results view + AI Lab state
+│       │   ├── analysis-cache.ts  # Upstash cache keyed by repo+SHA+intent
+│       │   └── rate-limit.ts      # Upstash rate limits + budget cap (fail closed)
 │       └── components/
-│           ├── url-input.tsx      # GitHub URL input + stream consumer
-│           ├── analysis-result.tsx # Results display
-│           ├── mermaid-diagram.tsx # Mermaid renderer
+│           ├── url-input.tsx      # URL input; lazy results + AI Lab split pane
+│           ├── analysis-result.tsx # Results display (lazy-loads Q&A)
+│           ├── ai-lab/
+│           │   └── ai-lab-panel.tsx # Live agent trace: calls, tools, cache, cost
 │           └── qa-chat.tsx        # Floating Q&A drawer with markdown
 │                                  # rendering, suggestion chips, error
 │                                  # fallback UI
@@ -45,9 +57,13 @@ reponboard-ai/
 │           ├── discovery.ts       # Layer 1: Heuristic discovery
 │           ├── llm-analysis.ts    # Layer 2: Claude LLM analysis
 │           ├── full-analysis.ts   # Orchestrator (sync + streaming)
+│           ├── file-workers.ts    # Orchestrator–worker fan-out (Haiku 5.5
+│           │                      # summarizes secondary key files in parallel)
+│           ├── trace.ts           # llm_call trace builder for the AI Lab
+│           ├── pricing.ts         # Per-model rates incl. cache read/write
 │           ├── qa.ts              # Q&A ReAct agent with system prompt +
 │           │                      # tool dispatch
-│           ├── qa-classifier.ts   # Pre-flight classifier (Haiku 4.5) with
+│           ├── qa-classifier.ts   # Pre-flight classifier (Haiku 5.5) with
 │           │                      # retry, 12s timeout, and fail-closed
 │           │                      # heuristic for degraded mode
 │           ├── qa-telemetry.ts    # Structured observability emitter
@@ -85,7 +101,7 @@ GitHub URL
     │
     ▼
 ┌─────────────────────────────────────────────────────────┐
-│  STREAMING OUTPUT (NDJSON)                              │
+│  STREAMING OUTPUT (Server-Sent Events)                  │
 │  - Phase events: discovery → fetching → analyzing       │
 │  - Progress updates with counts                         │
 │  - Final result or error                                │
@@ -94,12 +110,21 @@ GitHub URL
 
 ### Streaming Event Format
 
+Both streaming routes send `text/event-stream`. Each event's `event:`
+name is its `phase`, `data:` is the JSON payload below, ids are
+monotonic, and a `: ping` comment goes out every 15s.
+
 Progress events:
 - `{ "phase": "discovery", "message": "..." }`
 - `{ "phase": "analyzing", "message": "..." }`
 - `{ "phase": "thinking", "message": "...", "toolCall": "...", "toolInput": {...} }`
 - `{ "phase": "partial_core", "core": { ...refinedStack, executiveSummary, architectureInsights } }`
 - `{ "phase": "partial_guide", "guide": { ...keyFiles, explorationPath, codebaseContext } }`
+
+Trace events (drive the AI Lab):
+- `{ "phase": "llm_call", "call": { step, stage, model, latencyMs, tokensIn, tokensOut, cacheReadTokens, cacheWriteTokens, costUsd, toolUses, reasoning } }`
+- `{ "phase": "tool_end", "tool": { toolUseId, name, label, durationMs, resultChars, status } }` (paired to the `thinking` event with the same `toolUseId`)
+- `{ "phase": "cache_hit", "cachedAt": "..." }` (replayed analysis; followed by the stored trace and `complete`)
 
 Terminal events:
 - `{ "phase": "complete", "result": { /* FullAnalysisResult */ } }`
@@ -122,7 +147,7 @@ history. Explicit ANTI-PATTERNS list forbids recapping, inventing
 file paths, or assuming continuation of intent across turns.
 
 ### Layer 2 — Pre-flight Classifier
-Cheap Haiku 4.5 call classifies each question as on_topic /
+Cheap Haiku 5.5 call (structured output, effort `low`) classifies each question as on_topic /
 off_topic / needs_clarification before invoking the ReAct loop.
 Off-topic short-circuits with a canned response and 0 tool calls,
 reducing cost from ~$0.023 to ~$0.001 per off-topic query (22x
@@ -150,6 +175,7 @@ Postgres planned in Tier 2 backlog.
 
 Progress events:
 - `{ "phase": "thinking", "message": "...", "toolCall": "fetch_file", ... }`
+- `{ "phase": "llm_call", "call": { ... } }`
 - `{ "phase": "tool_result", "tool": "fetch_file", "summary": "..." }`
 
 Terminal events:
@@ -166,56 +192,53 @@ Terminal events:
 | UI primitives | shadcn/ui, lucide-react | Vercel/Linear-inspired |
 | Markdown | react-markdown + remark-gfm | Q&A answer rendering |
 | Syntax highlight | react-syntax-highlighter | Prism, 10 langs registered |
-| AI | Claude API | Haiku 4.5 (dev/classifier), Sonnet 4 (prod) |
-| Diagrams | Mermaid.js | Client-side rendering |
-| Rate limiting | Upstash Redis | Env-prefixed keys (dev/preview/prod) |
-| Streaming | NDJSON over Edge runtime | Progressive UI updates |
-| Deploy | Vercel Edge Functions | Free tier (Hobby plan) |
+| AI | Claude API (`@anthropic-ai/sdk` 1.x) | Haiku 5.5 (fast/classifier/workers), Sonnet 5.5 (quality) |
+| Rate limiting + cache | Upstash Redis | Env-prefixed keys (dev/preview/prod) |
+| Streaming | SSE on Node.js (Fluid Compute) | eventsource-parser on the client |
+| Fonts | next/font (Geist) | Self-hosted |
+| Deploy | Vercel Functions, Node runtime | Hobby plan; daily keepalive cron |
 | Monorepo | pnpm workspaces | Simple, efficient |
-| Tests | vitest | 21+ tests across agent-core |
+| Tests | vitest | agent-core + apps/web |
 
 ## LLM Routing & Benchmark
 
-The pipeline supports two execution intents that map to different
-models, balancing cost and quality:
+Intent-based routing (`LLM_MODEL_INTENT`):
 
-- **Fast intent** → Haiku 4.5 (`claude-haiku-4-5-20251001`)
-- **Quality intent** → Sonnet 4 (`claude-sonnet-4-20250514`)
+- **fast** → Haiku 5.5 (`claude-haiku-5-5`)
+- **quality** → Sonnet 5.5 (`claude-sonnet-5-5`) — production default
 
-Set via `LLM_MODE` environment variable: `development` uses
-Haiku, `production` uses Sonnet. The Q&A classifier always uses
-Haiku regardless of LLM_MODE, since classification is a
-high-volume, latency-sensitive operation where Sonnet would be
-overkill.
+`LLM_MODE` (development → fast, production → quality) is deprecated but
+still read. The Q&A classifier and the file workers always use Haiku 5.5.
+The `parity` intent was removed with Sonnet 4's retirement (2026-06-15).
 
-### Empirical benchmark (Block G, N=40)
+### Agent patterns in the pipeline
 
-A canonical dataset was produced comparing Haiku and Sonnet on
-this exact pipeline across two repos (`colinhacks/zod` and
-`pallets/flask`). Findings stored in
-`benchmark-results/block-g-final-canonical/` (immutable as of
-May 12, 2026). Methodology documented in `BENCHMARK_NOTES.md`
-at repo root.
+- **Prompt caching** — top-level auto `cache_control` on both ReAct
+  loops; both analysis phases share one tool list so the guide phase
+  reads the core phase's cached prefix.
+- **Strict tool use** — `finish_core` / `finish_guide` / `respond` are
+  `strict: true` with closed schemas (`withClosedObjects`).
+- **Steering without forced tool_choice** — forced `tool_choice` 400s on
+  Sonnet 5.5; the tool budget is enforced with an appended
+  mid-conversation `role: "system"` message plus budget-exhausted tool
+  results. History stays append-only (cache + thinking stay valid).
+- **Parallel tool calls** — executed with `Promise.all`, all results in
+  one user turn.
+- **Orchestrator–worker** — Haiku 5.5 workers summarize 5 secondary key
+  files in parallel before the core phase.
+- **Adaptive thinking + effort** — `display: "summarized"` feeds the AI
+  Lab; effort is set per route (classifier/workers `low`, others `medium`).
 
-Highlights:
-- Sonnet/Haiku speed ratio: **1.5–1.8× in practice** (the
-  advertised 4-5× ratio does not hold for this workload)
-- Cost ratio: ~3.0× (Sonnet expectedly more expensive)
-- Truncation rate: Sonnet truncates at **40%** vs Haiku at
-  **20%**, despite Sonnet making fewer tool calls overall.
-  Defensive coercion in `coerceCorePartial` /
-  `coerceGuidePartial` is therefore a feature, not a workaround.
-- The strict `VALID_PATTERNS` coercion array (10-value
-  ArchitecturePattern enum) prevents LLM free-form drift on
-  both models.
+### Benchmarks
 
-### Why this matters
+- **Block G** (May 2026, N=40, Haiku 4.5 vs Sonnet 4.6) —
+  `benchmark-results/block-g-final-canonical/`, immutable.
+- **Block H** (Oct 2026, N=40, Haiku 5.5 vs Sonnet 5.5, same protocol) —
+  `benchmark-results/block-h-2026-10-27/`. Comparison in
+  `BENCHMARK_NOTES.md`.
 
-Premium models are not strictly better. Sonnet's higher
-truncation rate means downstream code must handle missing fields
-gracefully even (or especially) on the more expensive tier.
-Intent-based routing lets the system pick the right tradeoff
-per request type rather than committing globally to one model.
+Defensive coercion (`coerceCorePartial` / `coerceGuidePartial`) stays as
+a backstop even though strict tools should make it a no-op.
 
 ## Environment Variables
 
@@ -223,7 +246,8 @@ per request type rather than committing globally to one model.
 # .env.local
 ANTHROPIC_API_KEY=sk-ant-...   # Required for LLM analysis
 GITHUB_TOKEN=ghp_...           # Optional: 60 → 5000 req/hr
-LLM_MODE=development           # development (Haiku) | production (Sonnet)
+LLM_MODEL_INTENT=fast          # fast (Haiku 5.5) | quality (Sonnet 5.5)
+CRON_SECRET=...                # Vercel cron auth for /api/keepalive (prod)
 ```
 
 ## Development Commands
@@ -262,23 +286,17 @@ pnpm lint         # Linting
 
 ## Key Implementation Details
 
-### Dual Model Support
+### Redis is fail-closed for spend, fail-open for display
 
-```typescript
-const MODELS = {
-  development: 'claude-haiku-4-5-20251001',  // Fast, cheap
-  production: 'claude-sonnet-4-20250514',    // Accurate, robust
-}
-```
+An archived/throttled Upstash DB answers `200 {error}`; `withRedis` turns
+that into `RateLimitUnavailableError`. `/api/analyze` and `/api/qa`
+return 503 (the budget cap lives in Redis); `/api/remaining` returns
+nulls. The analysis cache treats every failure as a miss.
 
-Set via `LLM_MODE` env var. Haiku for local dev, Sonnet for prod.
+### Timeouts
 
-### JSON Repair for Truncated Responses
-
-Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
-- Unclosed strings/arrays/objects
-- Trailing commas
-- Missing brackets
+GitHub requests 15s (`AbortSignal.timeout`), Anthropic calls 60s (SDK
+`timeout`), benchmark runs 180s wall-clock, analysis route 120s.
 
 ### Key Files Limit
 
@@ -289,14 +307,25 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 ### Completed (Production)
 - ✅ Two-layer analysis pipeline (heuristic discovery + LLM
   ReAct with tool_use)
-- ✅ Dual model support with intent-based routing (Haiku for
-  fast/classifier, Sonnet for quality, via LLM_MODE)
-- ✅ NDJSON streaming with partial_core / partial_guide events
+- ✅ Intent-based routing on Claude 5.5 (Haiku 5.5 fast /
+  classifier / workers, Sonnet 5.5 quality), SDK 1.x (Oct 2026)
+- ✅ SSE streaming with partial_core / partial_guide and agent
+  trace events (llm_call, tool_end)
+- ✅ AI Lab split pane: live trace of model calls, tool calls,
+  cache-hit %, tokens, cost, reasoning summaries
+- ✅ Prompt caching, strict tool use, parallel tool calls,
+  orchestrator–worker fan-out, adaptive thinking with effort
+- ✅ Analysis cache by repo + HEAD SHA + intent (Upstash, 7d)
+- ✅ Code-split results / Lab / Q&A (React.lazy + Suspense);
+  `/` first-load JS 189 kB → 123 kB
+- ✅ Upstash keepalive cron + fail-closed Redis handling
+  (post-mortem: 2026-10-26 outage from inactivity archival)
+- ✅ Node.js runtime (Edge removed), request timeouts everywhere
 - ✅ Defensive coercion (coerceCorePartial / coerceGuidePartial)
 - ✅ Architecture pattern enum (10 values) + patternDescription
 - ✅ Onboarding Journey timeline with checkmarks + progress
-- ✅ Empirical benchmark (Block G, N=40) comparing Haiku vs
-  Sonnet on this exact pipeline (zod + flask)
+- ✅ Empirical benchmarks: Block G (N=40, May 2026) and Block H
+  (N=40, Oct 2026, Claude 5.5) on this exact pipeline (zod + flask)
 - ✅ Q&A pipeline with four-layer defense-in-depth guardrail
   (system prompt + classifier + validator + observability)
 - ✅ Q&A markdown rendering (react-markdown + Prism syntax
@@ -307,24 +336,14 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 - ✅ UI error fallback with Retry button (no raw JSON exposed)
 - ✅ Upstash Redis rate limiting with env-prefixed keys
   (prod / preview / dev isolated in same DB)
-- ✅ 21+ unit tests across qa-classifier, qa-validator,
-  anthropic-retry, qa-telemetry
+- ✅ ~107 unit tests (agent-core + apps/web vitest)
 
-### Known Issues (P0 — Next Sprint)
-- 🐛 Empty answer string when QA tool budget exhausts on large
-  repos (e.g., a repo with 19+ files in a single subdirectory).
-  Cost can reach ~$0.18 with no useful UI output. Fix: validator
-  detects empty answer + force `respond` tool_choice when
-  budget hits cap.
-- 🐛 QA tool budget exhausted instruction in tool_result is
-  text-only, not enforced via tool_choice. Model occasionally
-  ignores and keeps fetching until iteration cap.
+### Known Issues
+- None open at P0. The QA empty-answer and ignored-budget bugs were
+  fixed in Oct 2026 (one corrective retry + canned fallback; post-budget
+  tool calls are answered without running).
 
 ### Backlog (Tier 1 — Robustness)
-- AbortController timeouts on Anthropic SDK + GitHub fetch +
-  benchmark wall-clock (no per-request timeout = unbounded wait)
-- Migrate llm-analysis.ts from text parsing to tool_use for
-  structured outputs (eliminate truncation bugs in guide phase)
 - IP hashing (SHA-1 truncated) in Redis keys for IPv6 colon
   collisions + privacy
 - Expose qa scope in /api/remaining response
@@ -334,7 +353,6 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 ### Backlog (Tier 2 — Infrastructure)
 - Neon Postgres + Drizzle ORM for persistent telemetry storage
   (currently stdout-only via Vercel logs)
-- Cache analyses by repo+SHA (Upstash KV)
 - Cache GitHub tree across Q&A turns within same session
 
 ### Backlog (Tier 3 — Features)
@@ -342,7 +360,8 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 - Session persistence (journey progress + analysis result across
   page refreshes)
 - CLI hybrid (npx reponboard <url> with browser open for results)
-- Model Lab (selector + telemetry visible per request)
+- Model selector in the AI Lab (pick fast/quality per request;
+  the trace view already exists)
 
 ### Backlog (Tier 4 — Big Features)
 - PR/Commit Timeline Analyzer with durable execution
@@ -350,7 +369,9 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 - "What Changed While You Were Away" narrative
 
 ### Tech Debt
-- Split llm-analysis.ts (~1033 lines, mixed concerns: schemas,
+- Analysis cancel on client disconnect stops after the in-flight
+  step; QA route has no cancel() hook yet
+- Split llm-analysis.ts (~1300 lines, mixed concerns: schemas,
   prompts, ReAct loop, coercion, streaming)
 - aria-expanded + focus management on collapsibles/dialog
 - next lint deprecated in Next.js 16 — migrate to ESLint CLI
@@ -360,5 +381,4 @@ Haiku sometimes truncates JSON output. `repairTruncatedJson()` handles:
 - [Next.js 15 Docs](https://nextjs.org/docs)
 - [Claude API Docs](https://docs.anthropic.com)
 - [GitHub REST API](https://docs.github.com/en/rest)
-- [Mermaid.js Docs](https://mermaid.js.org/intro/)
 - [Tailwind CSS](https://tailwindcss.com/docs)

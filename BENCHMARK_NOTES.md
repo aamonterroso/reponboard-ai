@@ -1,3 +1,85 @@
+# Benchmark Run Notes
+
+Two benchmarks on the same protocol: **Block H** (Oct 2026, Claude 5.5,
+first section) and **Block G** (May 2026, previous generation, kept
+verbatim below).
+
+# Block H — Claude 5.5 + agent patterns (2026-10-27)
+
+Same protocol as Block G: 2 repos × 2 intents × 10 runs, `caffeinate
+-dimsu`, 3s sleep between runs, authenticated GitHub, run from a clean
+worktree of `main` at `8afad23` (PR #17). Data:
+`benchmark-results/block-h-2026-10-27/`.
+
+What changed between G and H (all at once — this is a before/after of the
+whole modernization, not an ablation of each lever):
+
+- Models: `fast` Haiku 4.5 → **Haiku 5.5**; `quality` Sonnet 4.6 → **Sonnet 5.5**
+- Prompt caching (auto `cache_control`, one tool list across phases)
+- Strict tool use on `finish_core` / `finish_guide`
+- Forced `tool_choice` replaced by system-message steering
+- Parallel tool execution; Haiku 5.5 worker summaries of 5 secondary files
+- Adaptive thinking, effort `medium`; per-call (60s) and per-run (180s) timeouts
+
+## Results (`pnpm bench:summary --input benchmark-results/block-h-2026-10-27`)
+
+| Quadrant | N | Success | p50 | p95 | Cost mean | Truncation | Avg tool calls | Cache hit |
+|---|---|---|---|---|---|---|---|---|
+| zod fast (Haiku 5.5) | 10 | 10 | 26.7s | 29.6s | $0.0059 | 0% | 5.6 | 71% |
+| zod quality (Sonnet 5.5) | 10 | 10 | 23.9s | 43.6s | $0.0702 | 0% | 3.7 | 64% |
+| flask fast (Haiku 5.5) | 10 | 10 | 20.5s | 22.9s | $0.0026 | 0% | 3.7 | 88% |
+| flask quality (Sonnet 5.5) | 10 | 10 | 23.2s | 24.4s | $0.0483 | 0% | 2.0 | 84% |
+
+Total spend for the 40 runs: **$1.27**.
+
+## Block G → Block H
+
+| Quadrant | p50 G → H | Cost G → H | Truncation G → H |
+|---|---|---|---|
+| zod fast | 46.8s → 26.7s (**−43%**) | $0.057 → $0.0059 (**−90%**) | 20% → 0% |
+| zod quality | 76.5s → 23.9s (**−69%**) | $0.167 → $0.070 (**−58%**) | 40% → 0% |
+| flask fast | 31.8s → 20.5s (**−36%**) | $0.048 → $0.0026 (**−95%**) | 20% → 0% |
+| flask quality | 67.5s → 23.2s (**−66%**) | $0.135 → $0.048 (**−64%**) | 40% → 0% |
+
+Phase medians (core / guide): Sonnet went from 41–48s / 25–28s to
+9–15s / 7–8s. The guide phase now reads the core phase's cached prefix.
+
+## Observations
+
+- **Success rate 40/40** (Block G: 38/40). No hangs: the timeouts added
+  after Block G's 874s socket hang were never triggered.
+- **Truncation went to zero on both tiers.** Strict tool use guarantees
+  the finish payload matches the schema; `coercedFields` was empty on all
+  40 runs. The coercion code stays as a backstop.
+- **The quality tier is no longer the slow tier.** In Block G Sonnet was
+  1.6–2.1× slower than Haiku. In Block H, Sonnet 5.5 matches or beats
+  Haiku 5.5 on wall-clock (23.9s vs 26.7s on zod) because it explores less
+  (2.0–3.7 tool calls vs 3.7–5.6) and decides sooner. Cost is where the
+  tiers now differ: Sonnet 5.5 is ~12–19× Haiku 5.5 per analysis.
+- **Caching serves 64–88% of input tokens.** Higher on flask, where the
+  loop is shorter relative to the shared prefix.
+- **Fewer orchestrator tool calls** on every quadrant (G 5.4–7.1 → H
+  2.0–5.6): the worker summaries cover files the orchestrator used to
+  fetch.
+
+## Caveats
+
+1. **Cross-run cache warmth.** Consecutive runs on the same repo within 5
+   minutes share the cached system + tools + initial-prompt prefix, so
+   runs 2–10 start warmer than a first-time visitor. The cold first run of
+   each batch landed close to the median (zod: 29.6s / $0.0066 fast, 24.4s
+   / $0.069 quality; flask: 22.9s / $0.0040 fast, 24.4s / $0.070 quality),
+   so the effect on latency is small; on cost the cold run is up to ~45%
+   above the mean (flask quality).
+2. **Not an ablation.** Model and harness changes landed together. The
+   live AI Lab (per-call cache %, tool timings) is the place to attribute
+   individual wins; a per-lever ablation is future work.
+3. **N=10 per quadrant**, two repos. Treat percentages as directional.
+4. An effort sweep (low/medium/high) was not run in this block; route
+   defaults stay at `medium`.
+
+---
+
 # Block G — Benchmark Run Notes
 
 Operational journal for the systematic Haiku 4.5 vs Sonnet 4.6 benchmark of
