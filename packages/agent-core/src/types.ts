@@ -359,12 +359,23 @@ export type AnalysisStatus =
 
 export interface AnalysisMeta {
   model: string
-  intent: 'fast' | 'quality' | 'parity'
+  intent: 'fast' | 'quality'
   deprecatedModeUsed: boolean
   phase: 'core' | 'guide'
   latencyMs: number
+  // Uncached input tokens. Total input = tokensIn + cacheReadTokens +
+  // cacheWriteTokens (Block G predates caching, so its tokensIn is total).
   tokensIn: number
   tokensOut: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  // Orchestrator–worker fan-out stats (core phase only).
+  workers?: {
+    model: string
+    calls: number
+    latencyMs: number
+    costUsd: number
+  }
   costUsd: number
   toolCallCount: number
   truncated: boolean

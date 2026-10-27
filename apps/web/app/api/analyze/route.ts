@@ -124,12 +124,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     let intent: LLMModelIntent | undefined
     let llmMode: 'development' | 'production' = 'production'
 
-    if (rawIntent === 'fast' || rawIntent === 'quality' || rawIntent === 'parity') {
+    if (rawIntent === 'fast' || rawIntent === 'quality') {
       intent = rawIntent
     } else if (rawMode === 'development' || rawMode === 'production') {
       console.warn(
         '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
-          '"fast" | "quality" | "parity" instead.',
+          '"fast" | "quality" instead.',
       )
       llmMode = rawMode
     }

@@ -16,7 +16,25 @@ export interface ClassifyOutput {
   costUsd: number
 }
 
-const MODEL = 'claude-haiku-4-5-20251001'
+const MODEL = 'claude-haiku-5-5'
+
+// Structured output: the API constrains the response to this schema, so
+// the reply is always parseable JSON. `parseClassificationResult` still
+// validates ranges (structured outputs don't support min/max).
+const CLASSIFICATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    classification: {
+      type: 'string',
+      enum: ['on_topic', 'off_topic', 'needs_clarification'],
+    },
+    confidence: { type: 'number' },
+    reasoning: { type: 'string' },
+    suggestions: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['classification', 'confidence', 'reasoning', 'suggestions'],
+  additionalProperties: false,
+} as const
 
 const SYSTEM_PROMPT = `You are a question classifier for a code-aware assistant.
 
@@ -33,19 +51,12 @@ summary), classify the question into exactly one of three categories:
 - needs_clarification: the question is ambiguous; could be either
   on_topic or off_topic depending on intent.
 
-Respond ONLY with a JSON object matching this schema, no prose:
+Set "confidence" between 0.0 and 1.0 and keep "reasoning" to one or
+two sentences.
 
-{
-  "classification": "on_topic" | "off_topic" | "needs_clarification",
-  "confidence": <number between 0.0 and 1.0>,
-  "reasoning": "<one or two sentences>",
-  "suggestions": ["<question>", "<question>", "<question>"]
-}
-
-Include the "suggestions" field ONLY when classification is
-"off_topic". Suggestions should be 2-3 concrete questions about this
-specific repository that the user might ask instead. Omit the field
-entirely for on_topic and needs_clarification.`
+Fill "suggestions" ONLY when classification is "off_topic": 2-3
+concrete questions about this specific repository that the user might
+ask instead. Use an empty array for on_topic and needs_clarification.`
 
 // Fail-OPEN degraded result: when the classifier itself cannot run
 // (network/upstream failure, timeout, malformed JSON), we let the
@@ -135,10 +146,15 @@ export async function classifyQuestion(input: {
         Promise.race([
           client.messages.create({
             model: MODEL,
-            max_tokens: 200,
-            temperature: 0,
+            // Headroom for adaptive thinking, which is on by default on
+            // Haiku 5.5; effort 'low' keeps it brief for a routing call.
+            max_tokens: 1024,
             system: SYSTEM_PROMPT,
             messages: [{ role: 'user', content: userMessage }],
+            output_config: {
+              effort: 'low',
+              format: { type: 'json_schema', schema: CLASSIFICATION_SCHEMA },
+            },
           }),
           new Promise<never>((_, rej) =>
             setTimeout(() => rej(new Error('classifier timeout')), 12_000),
@@ -148,8 +164,11 @@ export async function classifyQuestion(input: {
     )
 
     const latencyMs = Date.now() - t0
-    const text =
-      response.content[0]?.type === 'text' ? response.content[0].text : ''
+    // Read by type: with thinking on, the first block is a thinking block.
+    const textBlock = response.content.find(
+      (b): b is Anthropic.TextBlock => b.type === 'text',
+    )
+    const text = textBlock?.text ?? ''
     const parsed = parseClassificationResult(text)
 
     if (parsed === null) {
@@ -157,11 +176,10 @@ export async function classifyQuestion(input: {
       return makeDegradedResult(latencyMs)
     }
 
-    const costUsd = calculateCost(
-      MODEL,
-      response.usage.input_tokens,
-      response.usage.output_tokens,
-    )
+    const costUsd = calculateCost(MODEL, {
+      tokensIn: response.usage.input_tokens,
+      tokensOut: response.usage.output_tokens,
+    })
 
     return {
       result: parsed,
