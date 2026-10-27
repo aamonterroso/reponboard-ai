@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
 import { addUsage, calculateCost, createUsageTotals } from './pricing'
+import { buildTraceLlmCall } from './trace'
 import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 import {
   formatWorkerSummaries,
@@ -20,6 +21,8 @@ import type {
   LLMGuidePartial,
   LLMKeyFile,
   LLMKeyFileCategory,
+  TraceLlmCall,
+  TraceToolCall,
   RefinedStack,
 } from './types'
 
@@ -538,7 +541,10 @@ export type LLMStreamEvent =
       message: string
       toolCall?: string
       toolInput?: Record<string, unknown>
+      toolUseId?: string
     }
+  | { type: 'llm_call'; call: TraceLlmCall }
+  | { type: 'tool_end'; tool: TraceToolCall }
   | { type: 'partial_core'; core: LLMCorePartial; meta: AnalysisMeta }
   | { type: 'partial_guide'; guide: LLMGuidePartial; meta: AnalysisMeta }
   | { type: 'result'; result: LLMAnalysisResult }
@@ -985,8 +991,19 @@ async function* runReactPhase(
         output_config: { effort: ANALYSIS_EFFORT },
       }),
     )
-    console.log(`[timing] anthropic api call took ${Date.now() - apiStart}ms`)
+    const apiLatencyMs = Date.now() - apiStart
+    console.log(`[timing] anthropic api call took ${apiLatencyMs}ms`)
     addUsage(usage, response.usage)
+    yield {
+      type: 'llm_call',
+      call: buildTraceLlmCall({
+        step: ctx.counters.iter,
+        stage: ctx.finishToolName === 'finish_core' ? 'core' : 'guide',
+        model: ctx.model,
+        latencyMs: apiLatencyMs,
+        response,
+      }),
+    }
 
     const finishBlock = response.content.find(
       (b): b is Anthropic.ToolUseBlock =>
@@ -1067,19 +1084,25 @@ async function* runReactPhase(
         message: label !== '' ? `${toolUse.name}: ${label}` : `${toolUse.name}...`,
         toolCall: toolUse.name,
         toolInput: toolUse.input as Record<string, unknown>,
+        toolUseId: toolUse.id,
       }
     }
 
+    const toolTraces: TraceToolCall[] = []
     const toolResults = await Promise.all(
       toolUses.map(async (toolUse): Promise<Anthropic.ToolResultBlockParam> => {
         if (toolUse.name === 'finish_core' || toolUse.name === 'finish_guide') {
           // The other phase's finish tool: not an exploration call.
-          return {
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            is_error: true,
-            content: `${toolUse.name} is not accepted in this phase. Call ${ctx.finishToolName}.`,
-          }
+          const content = `${toolUse.name} is not accepted in this phase. Call ${ctx.finishToolName}.`
+          toolTraces.push({
+            toolUseId: toolUse.id,
+            name: toolUse.name,
+            label: '',
+            durationMs: 0,
+            resultChars: content.length,
+            status: 'blocked',
+          })
+          return { type: 'tool_result', tool_use_id: toolUse.id, is_error: true, content }
         }
         ctx.counters.toolCalls++
         phaseToolCalls++
@@ -1093,12 +1116,22 @@ async function* runReactPhase(
               ctx.githubClient,
               ctx.repoContext,
             )
-        console.log(
-          `[timing] tool ${toolUse.name} (${describeToolInput(toolUse.input).slice(0, 40)}) took ${Date.now() - toolStart}ms`,
-        )
+        const durationMs = Date.now() - toolStart
+        const label = describeToolInput(toolUse.input)
+        console.log(`[timing] tool ${toolUse.name} (${label.slice(0, 40)}) took ${durationMs}ms`)
+        toolTraces.push({
+          toolUseId: toolUse.id,
+          name: toolUse.name,
+          label,
+          durationMs,
+          resultChars: resultText.length,
+          status: budgetExceeded ? 'blocked' : 'ok',
+        })
         return { type: 'tool_result', tool_use_id: toolUse.id, content: resultText }
       }),
     )
+
+    for (const tool of toolTraces) yield { type: 'tool_end', tool }
 
     ctx.messages.push({ role: 'assistant', content: response.content })
     ctx.messages.push({ role: 'user', content: toolResults })
@@ -1157,6 +1190,7 @@ export async function* analyzeWithLLMStream(
     }
   }
   const workers = await summarizeFilesWithWorkers(client, forWorkers)
+  for (const call of workers.traces) yield { type: 'llm_call', call }
   console.log(
     `[timing] ${workers.calls} worker summaries in ${workers.latencyMs}ms ($${workers.costUsd.toFixed(5)})`,
   )

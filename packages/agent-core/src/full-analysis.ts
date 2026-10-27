@@ -110,13 +110,19 @@ export async function* runFullAnalysisStream(
             message: string
             toolCall?: string
             toolInput?: Record<string, unknown>
+            toolUseId?: string
           } = {
             phase: 'thinking',
             message: event.message,
           }
           if (event.toolCall !== undefined) base.toolCall = event.toolCall
           if (event.toolInput !== undefined) base.toolInput = event.toolInput
+          if (event.toolUseId !== undefined) base.toolUseId = event.toolUseId
           yield base
+        } else if (event.type === 'llm_call') {
+          yield { phase: 'llm_call', call: event.call }
+        } else if (event.type === 'tool_end') {
+          yield { phase: 'tool_end', tool: event.tool }
         } else if (event.type === 'partial_core') {
           meta.core = event.meta
           yield { phase: 'partial_core', core: event.core }

@@ -8,6 +8,7 @@ import {
   type LLMModelIntent,
 } from './llm-analysis'
 import { addUsage, calculateCost, createUsageTotals } from './pricing'
+import { buildTraceLlmCall } from './trace'
 import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 import type { QaTelemetry } from './qa-telemetry'
 import type {
@@ -284,6 +285,7 @@ export async function* answerQuestion(
       // Parallel tool use is OFF on every call: the model returns at most
       // one tool_use per response, which makes QA_MAX_TOOL_CALLS an actual
       // hard cap on file fetches.
+      const callStart = Date.now()
       const response = await withAnthropicRetry(() =>
         client.messages.create({
           model,
@@ -299,6 +301,16 @@ export async function* answerQuestion(
       )
 
       addUsage(usage, response.usage)
+      yield {
+        phase: 'llm_call',
+        call: buildTraceLlmCall({
+          step: iteration,
+          stage: 'qa',
+          model,
+          latencyMs: Date.now() - callStart,
+          response,
+        }),
+      }
 
       // respond is the terminal tool
       const respondBlock = response.content.find(

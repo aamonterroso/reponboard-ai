@@ -265,6 +265,7 @@ export type QAProgressEvent =
       toolCall?: string
       toolInput?: Record<string, unknown>
     }
+  | { phase: 'llm_call'; call: TraceLlmCall }
   | { phase: 'tool_result'; tool: string; summary: string }
   | { phase: 'complete'; result: QAResult }
   | { phase: 'error'; error: string }
@@ -406,10 +407,41 @@ export type AnalysisPhase =
   | 'fetching'
   | 'analyzing'
   | 'thinking'
+  | 'llm_call'
+  | 'tool_end'
   | 'partial_core'
   | 'partial_guide'
   | 'complete'
   | 'error'
+
+// ─── Agent Trace (AI Lab) ─────────────────────────────────────────────────────
+
+// One Messages API call inside an agent loop, emitted right after it
+// returns. `reasoning` is the summarized thinking text, when any.
+export interface TraceLlmCall {
+  step: number
+  stage: 'workers' | 'core' | 'guide' | 'qa'
+  model: string
+  latencyMs: number
+  tokensIn: number
+  tokensOut: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+  toolUses: string[]
+  reasoning: string | null
+}
+
+// One tool execution, emitted when it finishes. Pairs with the
+// `thinking` event that carried the same `toolUseId`.
+export interface TraceToolCall {
+  toolUseId: string
+  name: string
+  label: string
+  durationMs: number
+  resultChars: number
+  status: 'ok' | 'blocked'
+}
 
 export type AnalysisProgressEvent =
   | { phase: 'discovery'; message: string }
@@ -420,7 +452,10 @@ export type AnalysisProgressEvent =
       message: string
       toolCall?: string
       toolInput?: Record<string, unknown>
+      toolUseId?: string
     }
+  | { phase: 'llm_call'; call: TraceLlmCall }
+  | { phase: 'tool_end'; tool: TraceToolCall }
   | { phase: 'partial_core'; core: LLMCorePartial }
   | { phase: 'partial_guide'; guide: LLMGuidePartial }
   | { phase: 'complete'; result: FullAnalysisResult }

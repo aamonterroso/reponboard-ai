@@ -226,6 +226,21 @@ export class GitHubClient {
     }
   }
 
+  // SHA of the latest commit on `ref` (default branch when omitted). One
+  // light call: the list endpoint omits per-file diffs. Used as the
+  // analysis cache key so a new push invalidates cached results.
+  async getHeadSha(owner: string, repo: string, ref?: string): Promise<string> {
+    const query = ref !== undefined ? `&sha=${encodeURIComponent(ref)}` : ''
+    const commits = await this.request<Array<{ sha: string }>>(
+      `/repos/${owner}/${repo}/commits?per_page=1${query}`,
+    )
+    const sha = commits[0]?.sha
+    if (sha === undefined) {
+      throw new GitHubError('NOT_FOUND', `No commits found for ${owner}/${repo}`)
+    }
+    return sha
+  }
+
   async getTree(
     owner: string,
     repo: string,
