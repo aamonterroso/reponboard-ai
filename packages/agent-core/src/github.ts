@@ -7,6 +7,9 @@ import type {
 
 const GITHUB_API_BASE = 'https://api.github.com'
 const CONCURRENCY_LIMIT = 5
+// Per-request cap. Without it a stalled socket hangs the whole
+// analysis (Block G lost a benchmark run to an 874s hang).
+const REQUEST_TIMEOUT_MS = 15_000
 
 // ─── Error Class ─────────────────────────────────────────────────────────────
 
@@ -147,6 +150,7 @@ export class GitHubClient {
     try {
       response = await fetch(`${GITHUB_API_BASE}${path}`, {
         headers: this.headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       })
     } catch (err) {
       throw new GitHubError(

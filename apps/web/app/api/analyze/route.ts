@@ -1,20 +1,21 @@
-export const runtime = 'edge'
+export const maxDuration = 300
 
 import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
 import type { LLMModelIntent } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
 import {
   checkRateLimit,
+  RATE_LIMITER_UNAVAILABLE_MESSAGE,
+  RateLimitUnavailableError,
   recordAnalysisCost,
   recordRequestStart,
 } from '@/lib/rate-limit'
+import type { RateLimitResult } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
-// Code-level cap on the analysis. Verified empirically that
-// Vercel Edge on the Hobby plan supports up to ~300s when the
-// response is streamed (test endpoint /timeout-test ran 89.91s
-// to completion). 120s gives Sonnet enough headroom for large
-// repos while still bounding worst-case behavior.
+// Code-level cap on the analysis, well under the 300s maxDuration of
+// the Node.js (Fluid Compute) function. 120s gives Sonnet enough
+// headroom for large repos while still bounding worst-case behavior.
 const TIMEOUT_MS = 120_000
 
 function getClientIp(request: Request): string {
@@ -75,7 +76,19 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   // even if the stream is aborted. Cost is added to the budget key only
   // after a successful 'complete' event.
   const ip = getClientIp(request)
-  const rateLimit = await checkRateLimit(ip, 'analyze')
+  // Fail closed when Redis is unreachable: the daily budget cap lives
+  // there, so serving without it would leave LLM spend uncapped.
+  let rateLimit: RateLimitResult
+  try {
+    rateLimit = await checkRateLimit(ip, 'analyze')
+    if (rateLimit.allowed) await recordRequestStart(ip, 'analyze')
+  } catch (err) {
+    if (!(err instanceof RateLimitUnavailableError)) throw err
+    return NextResponse.json(
+      { error: RATE_LIMITER_UNAVAILABLE_MESSAGE, reason: 'rate_limiter_unavailable' },
+      { status: 503 },
+    )
+  }
   if (!rateLimit.allowed) {
     const message =
       rateLimit.reason === 'budget_exceeded'
@@ -88,7 +101,6 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       { status: 429 },
     )
   }
-  await recordRequestStart(ip, 'analyze')
 
   let repoUrl: string
   try {
