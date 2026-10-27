@@ -1002,18 +1002,37 @@ async function* runReactPhase(
       // Append the finish call + a synthetic tool_result so the next phase can
       // continue from this conversation state.
       ctx.messages.push({ role: 'assistant', content: response.content })
+      // Only this phase's finish call is captured. The other phase's finish
+      // tool sent in the same turn (possible with parallel tool use) is
+      // rejected so the model resubmits it in its own phase rather than
+      // believing it was already accepted.
       const finalResults: Anthropic.ToolResultBlockParam[] = response.content
         .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
-        .map((b) => ({
-          type: 'tool_result' as const,
-          tool_use_id: b.id,
-          content:
-            b.name === 'finish_core'
-              ? 'Core captured. Now produce the detailed onboarding guide by calling finish_guide. You may explore additional files first if needed.'
-              : b.name === 'finish_guide'
-                ? 'Guide captured.'
-                : 'Skipped — proceeding to next phase.',
-        }))
+        .map((b): Anthropic.ToolResultBlockParam => {
+          if (b.id === finishBlock.id) {
+            return {
+              type: 'tool_result',
+              tool_use_id: b.id,
+              content:
+                b.name === 'finish_core'
+                  ? 'Core captured. Now produce the detailed onboarding guide by calling finish_guide. You may explore additional files first if needed.'
+                  : 'Guide captured.',
+            }
+          }
+          if (b.name === 'finish_core' || b.name === 'finish_guide') {
+            return {
+              type: 'tool_result',
+              tool_use_id: b.id,
+              is_error: true,
+              content: `${b.name} was not accepted yet. Call it again when asked.`,
+            }
+          }
+          return {
+            type: 'tool_result',
+            tool_use_id: b.id,
+            content: 'Skipped — proceeding to next phase.',
+          }
+        })
       ctx.messages.push({ role: 'user', content: finalResults })
       return {
         finishBlock,
