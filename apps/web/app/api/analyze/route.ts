@@ -23,6 +23,7 @@ import {
 } from '@/lib/analysis-cache'
 import type { CachedAnalysis, CachedTraceEvent } from '@/lib/analysis-cache'
 import { createSseWriter, SSE_HEADERS } from '@/lib/sse'
+import type { SseWriter } from '@/lib/sse'
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
 // Code-level cap on the analysis, well under the 300s maxDuration of
@@ -163,29 +164,13 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
   const hasLlm = anthropicApiKey !== undefined && anthropicApiKey !== ''
   const { intent, llmMode, resolvedIntent } = resolveIntent()
 
-  // Cache lookup runs before the rate limit: a hit costs no LLM spend, so
-  // it doesn't consume the visitor's daily allowance.
-  let cacheKey: string | null = null
-  if (hasLlm) {
-    cacheKey = await resolveCacheKey(repoUrl, githubToken, resolvedIntent)
-    const cached = cacheKey !== null ? await readCachedAnalysis(cacheKey) : null
-    if (cached !== null) {
-      console.log(`[analysis-cache] HIT ${cacheKey}`)
-      return replayCachedAnalysis(cached)
-    }
-  }
-
-  // Rate limit: check up-front against the shared Redis state; increment
-  // the request counter before the analysis runs so the slot is reserved
-  // even if the stream is aborted. Cost is added to the budget key only
-  // after a successful 'complete' event.
+  // Rate limit: check up-front against the shared Redis state. Fail
+  // closed when Redis is unreachable: the daily budget cap lives there, so
+  // serving without it would leave LLM spend uncapped.
   const ip = getClientIp(request)
-  // Fail closed when Redis is unreachable: the daily budget cap lives
-  // there, so serving without it would leave LLM spend uncapped.
   let rateLimit: RateLimitResult
   try {
     rateLimit = await checkRateLimit(ip, 'analyze')
-    if (rateLimit.allowed) await recordRequestStart(ip, 'analyze')
   } catch (err) {
     if (!(err instanceof RateLimitUnavailableError)) throw err
     return NextResponse.json(
@@ -206,6 +191,32 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
+  // Cache lookup sits behind the rate-limit check (the HEAD SHA lookup
+  // spends shared GitHub quota) but before the slot is recorded: a hit
+  // costs no LLM spend, so it doesn't consume the visitor's allowance.
+  let cacheKey: string | null = null
+  if (hasLlm) {
+    cacheKey = await resolveCacheKey(repoUrl, githubToken, resolvedIntent)
+    const cached = cacheKey !== null ? await readCachedAnalysis(cacheKey) : null
+    if (cached !== null) {
+      console.log(`[analysis-cache] HIT ${cacheKey}`)
+      return replayCachedAnalysis(cached)
+    }
+  }
+
+  // Reserve the slot before the analysis runs so it counts even if the
+  // stream is aborted. Cost is added to the budget key only after a
+  // successful 'complete' event.
+  try {
+    await recordRequestStart(ip, 'analyze')
+  } catch (err) {
+    if (!(err instanceof RateLimitUnavailableError)) throw err
+    return NextResponse.json(
+      { error: RATE_LIMITER_UNAVAILABLE_MESSAGE, reason: 'rate_limiter_unavailable' },
+      { status: 503 },
+    )
+  }
+
   if (hasLlm) {
     const generator = runFullAnalysisStream(
       repoUrl,
@@ -215,9 +226,18 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       intent,
     )
 
+    // Hoisted so cancel() can reach it: when the client disconnects, the
+    // writer closes and the loop below stops pulling from the agent after
+    // the in-flight step, instead of paying for the rest of the run.
+    let sse: SseWriter | null = null
     const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        console.log(`[timing] client disconnected at ${Date.now() - reqStart}ms`)
+        sse?.close()
+      },
       async start(controller) {
-        const sse = createSseWriter(controller)
+        const writer = createSseWriter(controller)
+        sse = writer
         // Trace events are kept so a successful run can be cached and
         // replayed into the AI Lab on a later hit.
         const trace: CachedTraceEvent[] = []
@@ -225,19 +245,19 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         const timeout = setTimeout(
           () => {
             console.log(`[timing] timeout reached at ${Date.now() - reqStart}ms`)
-            sse.send({
+            writer.send({
               phase: 'error',
               error:
                 'Analysis timed out. The repository may be too large — please try a smaller repo.',
             })
-            sse.close()
+            writer.close()
           },
           TIMEOUT_MS,
         )
 
         try {
           for await (const event of generator) {
-            if (sse.closed) break
+            if (writer.closed) break
             if (
               event.phase === 'llm_call' ||
               event.phase === 'tool_end' ||
@@ -268,17 +288,17 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
             if (event.phase === 'complete' || event.phase === 'error') {
               console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
             }
-            sse.send(event)
+            writer.send(event)
           }
         } catch (err) {
           console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
-          sse.send({
+          writer.send({
             phase: 'error',
             error: err instanceof Error ? err.message : 'Stream error',
           })
         } finally {
           clearTimeout(timeout)
-          sse.close()
+          writer.close()
         }
       },
     })

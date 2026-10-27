@@ -38,17 +38,25 @@ export function createSseWriter(
 ): SseWriter {
   let nextId = 1
   let closed = false
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+
+  // Every path that ends the stream goes through here so the heartbeat
+  // timer can't outlive it (a cancelled stream makes enqueue throw).
+  const markClosed = (): void => {
+    closed = true
+    clearInterval(heartbeat)
+  }
 
   const enqueue = (chunk: string): void => {
     if (closed) return
     try {
       controller.enqueue(textEncoder.encode(chunk))
     } catch {
-      closed = true
+      markClosed()
     }
   }
 
-  const heartbeat = setInterval(() => enqueue(HEARTBEAT), SSE_HEARTBEAT_MS)
+  heartbeat = setInterval(() => enqueue(HEARTBEAT), SSE_HEARTBEAT_MS)
 
   return {
     send(payload) {
@@ -56,8 +64,7 @@ export function createSseWriter(
     },
     close() {
       if (closed) return
-      closed = true
-      clearInterval(heartbeat)
+      markClosed()
       try {
         controller.close()
       } catch {

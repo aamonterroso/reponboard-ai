@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createSseWriter, formatSseEvent } from './sse'
 import { readSseEvents } from './sse-client'
 
@@ -29,5 +29,24 @@ describe('SSE round trip', () => {
       { phase: 'discovery', message: 'scan' },
       { phase: 'complete', result: { id: 'x' } },
     ])
+  })
+})
+
+describe('createSseWriter heartbeat', () => {
+  it('stops the heartbeat when the consumer cancels the stream', async () => {
+    vi.useFakeTimers()
+    const clear = vi.spyOn(globalThis, 'clearInterval')
+    let writer: ReturnType<typeof createSseWriter> | undefined
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        writer = createSseWriter(controller)
+      },
+    })
+    await stream.cancel()
+    writer?.send({ phase: 'thinking' }) // enqueue now throws -> closed
+    expect(writer?.closed).toBe(true)
+    expect(clear).toHaveBeenCalled()
+    clear.mockRestore()
+    vi.useRealTimers()
   })
 })

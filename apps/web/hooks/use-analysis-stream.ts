@@ -60,9 +60,22 @@ export function useAnalysisStream(): UseAnalysisStream {
         const contentType = response.headers.get('Content-Type') ?? ''
 
         if (contentType.includes('text/event-stream') && response.body !== null) {
+          let finished = false
           for await (const event of readSseEvents<AnalysisStreamEvent>(response.body)) {
             dispatch({ type: 'event', event, now: Date.now() })
-            if (event.phase === 'complete' || event.phase === 'error') break
+            if (event.phase === 'complete' || event.phase === 'error') {
+              finished = true
+              break
+            }
+          }
+          // The body can end without a terminal event (function killed,
+          // proxy cut the connection); don't leave the UI spinning.
+          if (!finished && !abort.signal.aborted) {
+            dispatch({
+              type: 'fail',
+              error: 'The analysis stream ended unexpectedly. Please try again.',
+              now: Date.now(),
+            })
           }
         } else {
           // Heuristic-only path (no ANTHROPIC_API_KEY) answers with JSON.
