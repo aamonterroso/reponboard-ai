@@ -344,11 +344,11 @@ export async function* answerQuestion(
         // empty, fall through to the canned fallback below instead of
         // shipping a blank bubble to the UI.
         if (answer === '') {
+          if (emptyAnswerRetried) break
+          emptyAnswerRetried = true
           if (telemetry !== undefined) {
             telemetry.emptyAnswerRetried = true
           }
-          if (emptyAnswerRetried) break
-          emptyAnswerRetried = true
           messages.push({ role: 'assistant', content: response.content })
           messages.push({
             role: 'user',
