@@ -7,7 +7,7 @@ import {
   type LLMMode,
   type LLMModelIntent,
 } from './llm-analysis'
-import { calculateCost } from './pricing'
+import { addUsage, calculateCost, createUsageTotals } from './pricing'
 import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
 import type { QaTelemetry } from './qa-telemetry'
 import type {
@@ -48,35 +48,19 @@ function buildTreeSummary(tree: GitHubTreeNode[]): string {
 }
 
 // Hard cap on exploration tool calls (fetch_file + list_directory)
-// per QA turn. When the cap is hit, the next iteration is run with
-// tool_choice forced to 'respond' so the agent has to emit its final
-// answer from the context it has — instead of being cut off mid-walk
-// or returning an empty answer. Pattern mirrors `finish_*` forcing in
+// per QA turn. When the cap is hit, the agent is steered to 'respond'
+// so it emits its final answer from the context it has — instead of
+// being cut off mid-walk. Pattern mirrors the `finish_*` steering in
 // llm-analysis.ts.
 const QA_MAX_TOOL_CALLS = 4
-// One extra iteration headroom for the forced-respond turn plus a
+// One extra iteration headroom for the steered-respond turn plus a
 // small safety margin if the model returns text-only and has to be
 // re-prompted to call respond.
 const MAX_ITERATIONS = QA_MAX_TOOL_CALLS + 3
-
-// Folds guidance text into the trailing user turn instead of pushing a
-// second consecutive user message after a tool_result turn.
-export function appendUserText(
-  messages: Anthropic.MessageParam[],
-  text: string,
-): void {
-  const last = messages[messages.length - 1]
-  if (last === undefined || last.role !== 'user') {
-    messages.push({ role: 'user', content: text })
-    return
-  }
-  const blocks: Anthropic.ContentBlockParam[] =
-    typeof last.content === 'string'
-      ? [{ type: 'text', text: last.content }]
-      : [...last.content]
-  blocks.push({ type: 'text', text })
-  last.content = blocks
-}
+// Thinking tokens count toward max_tokens; leave room for reasoning plus
+// a full markdown answer.
+const QA_MAX_TOKENS = 8_000
+const QA_EFFORT = 'medium' as const
 
 // ─── Tool Schema ──────────────────────────────────────────────────────────────
 
@@ -102,7 +86,11 @@ const QA_TOOLS: Anthropic.Tool[] = [
         },
       },
       required: ['answer', 'filesReferenced'],
+      additionalProperties: false,
     },
+    // Schema-guaranteed input: answer is always a string and
+    // filesReferenced always an array.
+    strict: true,
   },
 ]
 
@@ -252,11 +240,10 @@ export async function* answerQuestion(
 
     let toolCallCount = 0
     let iteration = 0
-    let tokensIn = 0
-    let tokensOut = 0
+    const usage = createUsageTotals()
     // Tracks whether the budget-exhausted anti-preamble nudge has
     // already been injected into the conversation. Without this flag
-    // we would push the same instruction on every forced iteration
+    // we would push the same instruction on every post-budget iteration
     // (text-only retry loops) and accumulate duplicates in `messages`.
     let forcedGuidanceInjected = false
     let emptyAnswerRetried = false
@@ -264,62 +251,54 @@ export async function* answerQuestion(
     while (iteration < MAX_ITERATIONS) {
       iteration++
 
-      // When the exploration budget is exhausted, force the next call to
-      // emit `respond` via tool_choice. The model produces its final
-      // answer from already-fetched context rather than burning more
-      // tool calls. Mirrors llm-analysis.ts's `finish_*` forcing.
-      const isForced = toolCallCount >= QA_MAX_TOOL_CALLS
-      if (isForced) {
-        console.log('[qa] forcing respond via tool_choice (budget exceeded)')
+      // When the exploration budget is exhausted, steer the next call to
+      // `respond`. Forced tool_choice returns a 400 on Sonnet 5.5, so this
+      // is an operator instruction appended as a mid-conversation system
+      // message (append-only keeps the cached prefix valid), and any
+      // exploration call that still arrives gets a budget-exhausted result
+      // instead of running.
+      const isBudgetExhausted = toolCallCount >= QA_MAX_TOOL_CALLS
+      if (isBudgetExhausted) {
         if (telemetry !== undefined) {
           telemetry.toolBudgetExhausted = true
         }
-        // Inject explicit anti-preamble guidance into the conversation
-        // once per turn. Forcing `tool_choice: 'respond'` makes the
-        // model call respond, but it doesn't constrain the *content*
-        // of respond.answer — under pressure the model often emits a
-        // transitional preamble ("let me look at the source code
-        // before answering") as the answer. Spelling out that there
-        // are NO more turns reduces that failure mode.
+        // Spelling out that there are NO more turns stops the model from
+        // putting a transitional preamble ("let me look at the source
+        // code before answering") in respond.answer.
         if (!forcedGuidanceInjected) {
-          appendUserText(
-            messages,
-            'TOOL BUDGET EXHAUSTED. You have NO more turns. Call respond ' +
+          console.log('[qa] tool budget exhausted; steering to respond')
+          messages.push({
+            role: 'system',
+            content:
+              'TOOL BUDGET EXHAUSTED. You have NO more turns. Call respond ' +
               'NOW with whatever substance you already learned. Do NOT ' +
               'announce next steps ("let me look at...", "I\'ll check...") ' +
               'and do NOT say you will examine anything. If you genuinely ' +
               'lack enough information to answer, say so plainly in one ' +
               'sentence as respond.answer and stop.',
-          )
+          })
           forcedGuidanceInjected = true
         }
       }
 
-      // Parallel tool use is OFF on every call. With type:'auto' +
-      // disable_parallel_tool_use the model returns at most one tool_use
-      // per response; with type:'tool' it returns exactly one. This is
-      // what makes QA_MAX_TOOL_CALLS an actual hard cap on file fetches
-      // instead of just a trigger for the next iteration's forcing.
-      const toolChoice = isForced
-        ? ({ type: 'tool' as const, name: 'respond' } as const)
-        : ({
-            type: 'auto' as const,
-            disable_parallel_tool_use: true,
-          } as const)
-
+      // Parallel tool use is OFF on every call: the model returns at most
+      // one tool_use per response, which makes QA_MAX_TOOL_CALLS an actual
+      // hard cap on file fetches.
       const response = await withAnthropicRetry(() =>
         client.messages.create({
           model,
-          max_tokens: 2048,
+          max_tokens: QA_MAX_TOKENS,
+          cache_control: { type: 'ephemeral' },
           system,
           tools: QA_TOOLS,
           messages,
-          tool_choice: toolChoice,
+          tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+          thinking: { type: 'adaptive', display: 'summarized' },
+          output_config: { effort: QA_EFFORT },
         }),
       )
 
-      tokensIn += response.usage.input_tokens
-      tokensOut += response.usage.output_tokens
+      addUsage(usage, response.usage)
 
       // respond is the terminal tool
       const respondBlock = response.content.find(
@@ -338,7 +317,7 @@ export async function* answerQuestion(
           : []
         const answer = typeof input.answer === 'string' ? input.answer.trim() : ''
 
-        // A forced `respond` can arrive with an empty or missing answer
+        // A post-budget `respond` can arrive with an empty answer
         // when the model burned its budget without learning anything
         // useful. Give it one corrective turn; if it still comes back
         // empty, fall through to the canned fallback below instead of
@@ -372,7 +351,7 @@ export async function* answerQuestion(
           // Dedupe in case the LLM repeats file paths — avoids React
           // duplicate-key warnings in the chat UI.
           filesReferenced: Array.from(new Set(rawFiles)),
-          costUsd: calculateCost(model, tokensIn, tokensOut),
+          costUsd: calculateCost(model, usage),
         }
         yield { phase: 'complete', result }
         return
@@ -403,6 +382,19 @@ export async function* answerQuestion(
       const toolResults: Anthropic.ToolResultBlockParam[] = []
 
       for (const toolUse of toolUses) {
+        // Post-budget calls are answered without running. They emit no
+        // thinking event, so the route's fetched-files set (used by the
+        // hallucination validator) only holds files actually read.
+        if (isBudgetExhausted) {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content:
+              'TOOL BUDGET EXHAUSTED. Do not call any more tools except respond.',
+          })
+          continue
+        }
+
         toolCallCount++
         const inp = toolUse.input as Record<string, unknown>
         const label =
@@ -465,7 +457,7 @@ export async function* answerQuestion(
         answer:
           'I started exploring but didn\'t find what I needed in time.  Could you point me to a specific area of the codebase?',
         filesReferenced: [],
-        costUsd: calculateCost(model, tokensIn, tokensOut),
+        costUsd: calculateCost(model, usage),
       },
     }
   } catch (err) {

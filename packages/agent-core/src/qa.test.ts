@@ -78,7 +78,7 @@ beforeEach(() => {
 })
 
 describe('answerQuestion — QA_MAX_TOOL_CALLS budget', () => {
-  it('stops exploration at 4 tool calls and forces tool_choice=respond on the next iteration', async () => {
+  it('stops exploration at 4 tool calls and steers to respond via a system message', async () => {
     // Greedy agent: would have fetched 6 files if allowed. The budget
     // hits after the 4th fetch_file, then iter 5 is run with
     // tool_choice forcing respond.
@@ -138,10 +138,19 @@ describe('answerQuestion — QA_MAX_TOOL_CALLS budget', () => {
       })
     }
 
-    // 3. 5th call MUST include tool_choice forcing 'respond'.
-    const forcedCall = calls[4]
-    if (forcedCall === undefined) throw new Error('missing forced SDK call')
-    expect(forcedCall.tool_choice).toEqual({ type: 'tool', name: 'respond' })
+    // 3. 5th call is NOT forced (forced tool_choice 400s on Sonnet 5.5);
+    // instead a mid-conversation system message steers it to respond.
+    const steeredCall = calls[4] as
+      | { tool_choice: unknown; messages: Array<{ role: string; content: unknown }> }
+      | undefined
+    if (steeredCall === undefined) throw new Error('missing steered SDK call')
+    expect(steeredCall.tool_choice).toEqual({
+      type: 'auto',
+      disable_parallel_tool_use: true,
+    })
+    const systemNotices = steeredCall.messages.filter((m) => m.role === 'system')
+    expect(systemNotices).toHaveLength(1)
+    expect(String(systemNotices[0]?.content)).toContain('TOOL BUDGET EXHAUSTED')
 
     // 4. Generator emitted a single complete event with the forced answer.
     const complete = events.find(
@@ -182,7 +191,7 @@ describe('answerQuestion — QA_MAX_TOOL_CALLS budget', () => {
     }
   })
 
-  it('does NOT force tool_choice when the agent finishes naturally before the budget', async () => {
+  it('sends no budget notice when the agent finishes naturally before the budget', async () => {
     // Agent only needs 2 fetches and then responds — budget never hit.
     mockCreate
       .mockResolvedValueOnce(fetchFileResponse('t1', 'src/a.ts'))
@@ -227,6 +236,45 @@ describe('answerQuestion — QA_MAX_TOOL_CALLS budget', () => {
     }
     expect(telemetry.toolBudgetExhausted).toBe(false)
     expect(telemetry.toolCallsUsed).toBe(2)
+    const last = calls[2] as { messages: Array<{ role: string }> }
+    expect(last.messages.some((m) => m.role === 'system')).toBe(false)
+  })
+
+  it('does not execute exploration tools that arrive after the budget is spent', async () => {
+    mockCreate
+      .mockResolvedValueOnce(fetchFileResponse('t1', 'src/a.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t2', 'src/b.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t3', 'src/c.ts'))
+      .mockResolvedValueOnce(fetchFileResponse('t4', 'src/d.ts'))
+      // Model ignores the notice and asks for a 5th file.
+      .mockResolvedValueOnce(fetchFileResponse('t5', 'src/e.ts'))
+      .mockResolvedValueOnce(respondResponse('Answer.', ['src/a.ts']))
+
+    const { executeExplorationTool } = await import('./llm-analysis')
+    const exec = vi.mocked(executeExplorationTool)
+    exec.mockClear()
+
+    const telemetry = buildTelemetry('budget-guard')
+    await drain(runQa('Trace it.', telemetry))
+
+    expect(exec).toHaveBeenCalledTimes(4)
+    expect(telemetry.toolCallsUsed).toBe(4)
+  })
+
+  it('sends prompt caching, adaptive thinking, and a strict respond tool', async () => {
+    mockCreate.mockResolvedValueOnce(respondResponse('Done.', []))
+    await drain(runQa('What is this?'))
+
+    const call = mockCreate.mock.calls[0]?.[0] as {
+      cache_control: unknown
+      thinking: unknown
+      tools: Array<{ name: string; strict?: boolean; input_schema: { additionalProperties?: boolean } }>
+    }
+    expect(call.cache_control).toEqual({ type: 'ephemeral' })
+    expect(call.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    const respond = call.tools.find((t) => t.name === 'respond')
+    expect(respond?.strict).toBe(true)
+    expect(respond?.input_schema.additionalProperties).toBe(false)
   })
 
   it('folds budget-exhausted guidance into the tool_result turn (no consecutive user messages)', async () => {

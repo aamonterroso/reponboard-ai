@@ -1,7 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GitHubClient } from './github'
-import { calculateCost } from './pricing'
+import { addUsage, calculateCost, createUsageTotals } from './pricing'
 import { ANTHROPIC_TIMEOUT_MS, withAnthropicRetry } from './anthropic-retry'
+import {
+  formatWorkerSummaries,
+  summarizeFilesWithWorkers,
+  WORKER_MODEL,
+} from './file-workers'
 import type {
   AnalysisMeta,
   ArchitectureInsights,
@@ -303,7 +308,9 @@ const FINISH_GUIDE_SCHEMA: Anthropic.Tool.InputSchema = {
             type: 'string',
             description: '(1 sentence, ~120 chars)',
           },
-          category: { type: 'string' },
+          // Enum + strict tool use means the category is always valid,
+          // so the coercion fallback for it should never fire.
+          category: { type: 'string', enum: [...VALID_KEY_FILE_CATEGORIES] },
         },
         required: ['path', 'whatItDoes', 'whyImportant', 'category'],
       },
@@ -332,6 +339,23 @@ const FINISH_GUIDE_SCHEMA: Anthropic.Tool.InputSchema = {
     },
   },
   required: ['keyFiles', 'explorationPath', 'codebaseContext'],
+}
+
+// Strict tool use requires `additionalProperties: false` on every object
+// in the schema. Applied to the terminal tools so the API guarantees
+// their input matches the schema — Block G's "truncation" was the model
+// dropping required fields, not running out of tokens.
+export function withClosedObjects<T>(schema: T): T {
+  if (Array.isArray(schema)) {
+    return schema.map((item: unknown) => withClosedObjects(item)) as T
+  }
+  if (typeof schema !== 'object' || schema === null) return schema
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(schema)) {
+    out[key] = withClosedObjects(value)
+  }
+  if (out.type === 'object') out.additionalProperties = false
+  return out as T
 }
 
 export const EXPLORATION_TOOLS: Anthropic.Tool[] = [
@@ -386,23 +410,24 @@ export const EXPLORATION_TOOLS: Anthropic.Tool[] = [
   },
 ]
 
-const CORE_TOOLS: Anthropic.Tool[] = [
+// One tool list for both phases. Tools render first in the prompt, so a
+// per-phase list would invalidate the cached prefix at the phase switch;
+// the loop instead rejects the finish tool that belongs to the other phase.
+const ANALYSIS_TOOLS: Anthropic.Tool[] = [
   ...EXPLORATION_TOOLS,
   {
     name: 'finish_core',
     description:
       'Submit the core structural analysis: stack, summary, and architecture. Call this FIRST after exploring the repo. After this is captured, you will be asked to produce the detailed onboarding guide.',
-    input_schema: FINISH_CORE_SCHEMA,
+    input_schema: withClosedObjects(FINISH_CORE_SCHEMA),
+    strict: true,
   },
-]
-
-const GUIDE_TOOLS: Anthropic.Tool[] = [
-  ...EXPLORATION_TOOLS,
   {
     name: 'finish_guide',
     description:
       'Submit the detailed onboarding guide: key files (categorized), exploration path (5-step journey), and any additional codebase context. Call this AFTER finish_core.',
-    input_schema: FINISH_GUIDE_SCHEMA,
+    input_schema: withClosedObjects(FINISH_GUIDE_SCHEMA),
+    strict: true,
   },
 ]
 
@@ -483,20 +508,27 @@ export async function executeExplorationTool(
 
 // ─── Model Configuration ──────────────────────────────────────────────────────
 
-const MODELS = {
-  development: 'claude-haiku-4-5-20251001',
-  production: 'claude-sonnet-4-20250514',
-} as const
+// Intent-based routing. `fast` serves dev and the cheap tier; `quality`
+// is the production default. Sonnet 4 (the old `parity` target) was
+// retired on 2026-06-15, so that intent is gone.
+export type LLMModelIntent = 'fast' | 'quality'
 
-export type LLMMode = keyof typeof MODELS
-
-export type LLMModelIntent = 'fast' | 'quality' | 'parity'
+// Kept for the deprecated LLM_MODE env var: development maps to fast,
+// production to quality.
+export type LLMMode = 'development' | 'production'
 
 export const INTENT_TO_MODEL: Record<LLMModelIntent, string> = {
-  fast: MODELS.development,
-  quality: 'claude-sonnet-4-6',
-  parity: MODELS.production,
+  fast: 'claude-haiku-5-5',
+  quality: 'claude-sonnet-5-5',
 }
+
+// Adaptive thinking is on by default on both 5.5 models; effort is the
+// depth control. `medium` keeps the ReAct loop brisk; Block H sweeps it.
+const ANALYSIS_EFFORT = 'medium' as const
+
+// Thinking tokens count toward max_tokens, so the cap leaves room for
+// reasoning plus the largest finish_* payload (~2K tokens in Block G).
+const ANALYSIS_MAX_TOKENS = 16_000
 
 // ─── Streaming Events ─────────────────────────────────────────────────────────
 
@@ -813,13 +845,17 @@ const KEY_FILE_IMPORTANCE_RANK: Record<
 
 const PREFETCH_FILE_LIMIT = 3
 const PREFETCH_CONTENT_CHARS = 3000
+// Key files ranked just below the raw prefetch go to worker summaries.
+const WORKER_FILE_LIMIT = 5
 
 // Fetch the top N most important keyFiles in parallel so the agent has
-// immediate context without burning tool calls on obvious files.
+// immediate context without burning tool calls on obvious files. The
+// returned map keeps importance order.
 async function prefetchTopKeyFiles(
   discovery: DiscoveryResult,
   githubClient: GitHubClient,
   repoContext: { owner: string; repo: string; branch: string },
+  limit: number,
 ): Promise<Map<string, string>> {
   const top = [...discovery.keyFiles]
     .sort(
@@ -827,7 +863,7 @@ async function prefetchTopKeyFiles(
         KEY_FILE_IMPORTANCE_RANK[a.importance] -
         KEY_FILE_IMPORTANCE_RANK[b.importance],
     )
-    .slice(0, PREFETCH_FILE_LIMIT)
+    .slice(0, limit)
     .map((f) => f.path)
 
   if (top.length === 0) return new Map()
@@ -840,8 +876,11 @@ async function prefetchTopKeyFiles(
   )
 
   const contents = new Map<string, string>()
-  for (const [path, value] of raw) {
-    if (!(value instanceof Error)) contents.set(path, value.content)
+  for (const path of top) {
+    const value = raw.get(path)
+    if (value !== undefined && !(value instanceof Error)) {
+      contents.set(path, value.content)
+    }
   }
   return contents
 }
@@ -879,22 +918,33 @@ export interface PhaseRunResult {
   latencyMs: number
   tokensIn: number
   tokensOut: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
   toolCallCount: number
+}
+
+function describeToolInput(input: unknown): string {
+  if (typeof input !== 'object' || input === null) return ''
+  const inp = input as Record<string, unknown>
+  if ('path' in inp) return String(inp.path ?? '')
+  if ('query' in inp) return String(inp.query ?? '')
+  return ''
 }
 
 // Run a single ReAct phase. Yields thinking events as the agent works, and
 // returns the captured finish tool_use block (or null if the phase exhausted
 // its iteration budget without one). Mutates `ctx.messages` so the caller can
-// continue the conversation in the next phase.
+// continue the conversation in the next phase. History is append-only, which
+// keeps both the prompt cache and replayed thinking blocks valid.
 async function* runReactPhase(
   ctx: PhaseContext,
 ): AsyncGenerator<LLMStreamEvent, PhaseRunResult> {
   const phaseMaxIterations = ctx.maxToolCalls + 3
   let phaseIter = 0
   const phaseStart = Date.now()
-  let phaseTokensIn = 0
-  let phaseTokensOut = 0
+  const usage = createUsageTotals()
   let phaseToolCalls = 0
+  let budgetNoticeSent = false
 
   while (phaseIter < phaseMaxIterations) {
     phaseIter++
@@ -904,34 +954,39 @@ async function* runReactPhase(
       `[timing] llm iter ${ctx.counters.iter} starting at +${iterStart - ctx.llmStart}ms`,
     )
 
-    const isForced = ctx.counters.toolCalls >= ctx.maxToolCalls
-    if (isForced) {
-      console.log(
-        `[timing] forcing ${ctx.finishToolName} via tool_choice (budget exceeded)`,
-      )
+    // Forced tool_choice returns a 400 on Sonnet 5.5, so the budget is
+    // enforced by an operator instruction instead: a mid-conversation
+    // system message appended once, plus "budget exhausted" results for
+    // any exploration call that still comes through. Appending (rather
+    // than editing the top-level system prompt) keeps the cached prefix.
+    const budgetExceeded = ctx.counters.toolCalls >= ctx.maxToolCalls
+    if (budgetExceeded && !budgetNoticeSent) {
+      console.log(`[timing] tool budget exhausted; steering to ${ctx.finishToolName}`)
+      ctx.messages.push({
+        role: 'system',
+        content: `Tool budget exhausted. Do not call any exploration tools. Call ${ctx.finishToolName} now with your best structured result from what you have already seen.`,
+      })
+      budgetNoticeSent = true
     }
 
     const apiStart = Date.now()
     const response = await withAnthropicRetry(() =>
       ctx.client.messages.create({
         model: ctx.model,
-        max_tokens: 2000,
+        max_tokens: ANALYSIS_MAX_TOKENS,
+        // Auto-caching: the breakpoint moves to the last cacheable block
+        // on every call, so each iteration reads the previous prefix
+        // (system + tools + history) from cache.
+        cache_control: { type: 'ephemeral' },
         system: SYSTEM_PROMPT,
         tools: ctx.tools,
         messages: ctx.messages,
-        ...(isForced
-          ? {
-              tool_choice: {
-                type: 'tool' as const,
-                name: ctx.finishToolName,
-              },
-            }
-          : {}),
+        thinking: { type: 'adaptive', display: 'summarized' },
+        output_config: { effort: ANALYSIS_EFFORT },
       }),
     )
     console.log(`[timing] anthropic api call took ${Date.now() - apiStart}ms`)
-    phaseTokensIn += response.usage.input_tokens
-    phaseTokensOut += response.usage.output_tokens
+    addUsage(usage, response.usage)
 
     const finishBlock = response.content.find(
       (b): b is Anthropic.ToolUseBlock =>
@@ -963,8 +1018,7 @@ async function* runReactPhase(
       return {
         finishBlock,
         latencyMs: Date.now() - phaseStart,
-        tokensIn: phaseTokensIn,
-        tokensOut: phaseTokensOut,
+        ...usage,
         toolCallCount: phaseToolCalls,
       }
     }
@@ -983,58 +1037,49 @@ async function* runReactPhase(
       continue
     }
 
-    const budgetExceeded = ctx.counters.toolCalls >= ctx.maxToolCalls
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-
+    // Parallel tool use: the model may emit several tool_use blocks in one
+    // turn. Announce them in order, run them concurrently, and return every
+    // result in a single user message (splitting them across messages
+    // teaches the model to stop batching).
     for (const toolUse of toolUses) {
-      ctx.counters.toolCalls++
-      phaseToolCalls++
-      const pathOrQuery =
-        typeof toolUse.input === 'object' &&
-        toolUse.input !== null &&
-        'path' in toolUse.input
-          ? String((toolUse.input as Record<string, unknown>).path ?? '')
-          : typeof toolUse.input === 'object' &&
-              toolUse.input !== null &&
-              'query' in toolUse.input
-            ? String((toolUse.input as Record<string, unknown>).query ?? '')
-            : ''
-
+      const label = describeToolInput(toolUse.input)
       yield {
         type: 'thinking',
-        message:
-          pathOrQuery !== ''
-            ? `${toolUse.name}: ${pathOrQuery}`
-            : `${toolUse.name}...`,
+        message: label !== '' ? `${toolUse.name}: ${label}` : `${toolUse.name}...`,
         toolCall: toolUse.name,
         toolInput: toolUse.input as Record<string, unknown>,
       }
-
-      const truncatedInput =
-        pathOrQuery.length > 40 ? pathOrQuery.slice(0, 40) : pathOrQuery
-      const toolStart = Date.now()
-      let resultText: string
-      if (budgetExceeded) {
-        resultText = `TOOL BUDGET EXHAUSTED. Do not call any more exploration tools. Call ${ctx.finishToolName} immediately with your best result.`
-      } else {
-        resultText = await executeExplorationTool(
-          toolUse.name,
-          toolUse.input,
-          ctx.discovery.tree,
-          ctx.githubClient,
-          ctx.repoContext,
-        )
-      }
-      console.log(
-        `[timing] tool ${toolUse.name} (${truncatedInput}) took ${Date.now() - toolStart}ms`,
-      )
-
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: toolUse.id,
-        content: resultText,
-      })
     }
+
+    const toolResults = await Promise.all(
+      toolUses.map(async (toolUse): Promise<Anthropic.ToolResultBlockParam> => {
+        if (toolUse.name === 'finish_core' || toolUse.name === 'finish_guide') {
+          // The other phase's finish tool: not an exploration call.
+          return {
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            is_error: true,
+            content: `${toolUse.name} is not accepted in this phase. Call ${ctx.finishToolName}.`,
+          }
+        }
+        ctx.counters.toolCalls++
+        phaseToolCalls++
+        const toolStart = Date.now()
+        const resultText = budgetExceeded
+          ? `TOOL BUDGET EXHAUSTED. Do not call any more exploration tools. Call ${ctx.finishToolName} immediately with your best result.`
+          : await executeExplorationTool(
+              toolUse.name,
+              toolUse.input,
+              ctx.discovery.tree,
+              ctx.githubClient,
+              ctx.repoContext,
+            )
+        console.log(
+          `[timing] tool ${toolUse.name} (${describeToolInput(toolUse.input).slice(0, 40)}) took ${Date.now() - toolStart}ms`,
+        )
+        return { type: 'tool_result', tool_use_id: toolUse.id, content: resultText }
+      }),
+    )
 
     ctx.messages.push({ role: 'assistant', content: response.content })
     ctx.messages.push({ role: 'user', content: toolResults })
@@ -1043,8 +1088,7 @@ async function* runReactPhase(
   return {
     finishBlock: null,
     latencyMs: Date.now() - phaseStart,
-    tokensIn: phaseTokensIn,
-    tokensOut: phaseTokensOut,
+    ...usage,
     toolCallCount: phaseToolCalls,
   }
 }
@@ -1072,16 +1116,36 @@ export async function* analyzeWithLLMStream(
 
   // Pre-fetch top key files in parallel so the agent has immediate context
   // and doesn't burn its tool budget on obvious fetches.
-  const prefetched = await prefetchTopKeyFiles(
+  const fetched = await prefetchTopKeyFiles(
     discovery,
     githubClient,
     repoContext,
+    PREFETCH_FILE_LIMIT + WORKER_FILE_LIMIT,
   )
   console.log(
     `[timing] key files fetched in ${Date.now() - llmStart}ms (cumulative since llm stage start)`,
   )
+  const fetchedEntries = Array.from(fetched.entries())
+  const prefetched = new Map(fetchedEntries.slice(0, PREFETCH_FILE_LIMIT))
+  const forWorkers = new Map(fetchedEntries.slice(PREFETCH_FILE_LIMIT))
+
+  if (forWorkers.size > 0) {
+    yield {
+      type: 'thinking',
+      message: `Summarizing ${forWorkers.size} key files with worker models...`,
+      toolCall: 'worker_summaries',
+      toolInput: { paths: Array.from(forWorkers.keys()) },
+    }
+  }
+  const workers = await summarizeFilesWithWorkers(client, forWorkers)
+  console.log(
+    `[timing] ${workers.calls} worker summaries in ${workers.latencyMs}ms ($${workers.costUsd.toFixed(5)})`,
+  )
+
   const initialUser =
-    buildInitialUserPrompt(discovery) + formatPrefetchedContent(prefetched)
+    buildInitialUserPrompt(discovery) +
+    formatPrefetchedContent(prefetched) +
+    formatWorkerSummaries(workers.summaries)
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: initialUser },
@@ -1097,7 +1161,7 @@ export async function* analyzeWithLLMStream(
     model,
     messages,
     finishToolName: 'finish_core',
-    tools: CORE_TOOLS,
+    tools: ANALYSIS_TOOLS,
     maxToolCalls: MAX_TOOL_CALLS_CORE,
     githubClient,
     discovery,
@@ -1125,7 +1189,16 @@ export async function* analyzeWithLLMStream(
     latencyMs: coreRun.latencyMs,
     tokensIn: coreRun.tokensIn,
     tokensOut: coreRun.tokensOut,
-    costUsd: calculateCost(model, coreRun.tokensIn, coreRun.tokensOut),
+    cacheReadTokens: coreRun.cacheReadTokens,
+    cacheWriteTokens: coreRun.cacheWriteTokens,
+    // Worker spend is billed to the core phase it feeds.
+    costUsd: calculateCost(model, coreRun) + workers.costUsd,
+    workers: {
+      model: WORKER_MODEL,
+      calls: workers.calls,
+      latencyMs: workers.latencyMs,
+      costUsd: workers.costUsd,
+    },
     toolCallCount: coreRun.toolCallCount,
     truncated: coreCoerced.length > 0,
     coercedFields: coreCoerced,
@@ -1140,7 +1213,7 @@ export async function* analyzeWithLLMStream(
     model,
     messages,
     finishToolName: 'finish_guide',
-    tools: GUIDE_TOOLS,
+    tools: ANALYSIS_TOOLS,
     maxToolCalls: MAX_TOOL_CALLS_GUIDE,
     githubClient,
     discovery,
@@ -1164,7 +1237,9 @@ export async function* analyzeWithLLMStream(
     latencyMs: guideRun.latencyMs,
     tokensIn: guideRun.tokensIn,
     tokensOut: guideRun.tokensOut,
-    costUsd: calculateCost(model, guideRun.tokensIn, guideRun.tokensOut),
+    cacheReadTokens: guideRun.cacheReadTokens,
+    cacheWriteTokens: guideRun.cacheWriteTokens,
+    costUsd: calculateCost(model, guideRun),
     toolCallCount: guideRun.toolCallCount,
     truncated: guideCoerced.length > 0,
     coercedFields: guideCoerced,
