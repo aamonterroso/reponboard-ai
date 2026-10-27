@@ -20,6 +20,7 @@ import {
   recordAnalysisCost,
   recordRequestStart,
 } from '@/lib/rate-limit'
+import { encodeSseEvent, SSE_HEADERS } from '@/lib/sse'
 import type { RateLimitResult } from '@/lib/rate-limit'
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
@@ -270,14 +271,11 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       shortcutResult.suggestions = classifyResult.result.suggestions
     }
 
-    const shortcutEncoder = new TextEncoder()
     const shortcutStream = new ReadableStream({
       start(controller) {
         try {
           controller.enqueue(
-            shortcutEncoder.encode(
-              JSON.stringify({ phase: 'complete', result: shortcutResult }) + '\n',
-            ),
+            encodeSseEvent({ phase: 'complete', result: shortcutResult }),
           )
         } catch (err) {
           if (shortcutTelemetry !== null) {
@@ -286,15 +284,13 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
           }
           try {
             controller.enqueue(
-              shortcutEncoder.encode(
-                JSON.stringify({
+              encodeSseEvent({
                   phase: 'error',
                   error:
                     'Something went wrong. If this persists, please reload the page.',
                   errorCode: 'INTERNAL_ERROR',
                   requestId: shortcutTelemetry?.requestId ?? '',
-                }) + '\n',
-              ),
+                }),
             )
           } catch {
             /* ignore */
@@ -310,8 +306,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
 
     return new Response(shortcutStream, {
       headers: {
-        'Content-Type': 'application/x-ndjson',
-        'Cache-Control': 'no-cache',
+        ...SSE_HEADERS,
         'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
       },
     })
@@ -344,8 +339,6 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     intent,
     initialTelemetry,
   )
-
-  const encoder = new TextEncoder()
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false
@@ -356,14 +349,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
         if (errorMsg !== undefined) {
           try {
             controller.enqueue(
-              encoder.encode(
-                JSON.stringify({
+              encodeSseEvent({
                   phase: 'error',
                   error: errorMsg,
                   errorCode: 'INTERNAL_ERROR',
                   requestId: telemetry?.requestId ?? '',
-                }) + '\n',
-              ),
+                }),
             )
           } catch {
             /* ignore */
@@ -505,12 +496,10 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
                       })
                     }
                     controller.enqueue(
-                      encoder.encode(
-                        JSON.stringify({
+                      encodeSseEvent({
                           phase: 'complete',
                           result: retryEnriched,
-                        }) + '\n',
-                      ),
+                        }),
                     )
                   } else {
                     const cannedResult = {
@@ -542,19 +531,17 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
                       )
                     }
                     controller.enqueue(
-                      encoder.encode(
-                        JSON.stringify({
+                      encodeSseEvent({
                           phase: 'complete',
                           result: cannedResult,
-                        }) + '\n',
-                      ),
+                        }),
                     )
                   }
                   retryHandled = true
                   break
                 } else {
                   controller.enqueue(
-                    encoder.encode(JSON.stringify(retryEvent) + '\n'),
+                    encodeSseEvent(retryEvent),
                   )
                 }
               }
@@ -587,12 +574,10 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
                   )
                 }
                 controller.enqueue(
-                  encoder.encode(
-                    JSON.stringify({
+                  encodeSseEvent({
                       phase: 'complete',
                       result: cannedResult,
-                    }) + '\n',
-                  ),
+                    }),
                 )
               }
               break
@@ -622,12 +607,10 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
                 })
               }
               controller.enqueue(
-                encoder.encode(
-                  JSON.stringify({
+                encodeSseEvent({
                     phase: 'complete',
                     result: cannedResult,
-                  }) + '\n',
-                ),
+                  }),
               )
               break
             }
@@ -642,12 +625,10 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
               })
             }
             controller.enqueue(
-              encoder.encode(
-                JSON.stringify({ phase: 'complete', result: enrichedResult }) + '\n',
-              ),
+              encodeSseEvent({ phase: 'complete', result: enrichedResult }),
             )
           } else {
-            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+            controller.enqueue(encodeSseEvent(event))
           }
         }
       } catch (err) {
@@ -675,14 +656,12 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
           closed = true
           try {
             controller.enqueue(
-              encoder.encode(
-                JSON.stringify({
+              encodeSseEvent({
                   phase: 'error',
                   error: errorMessage,
                   errorCode,
                   requestId: telemetry?.requestId ?? '',
-                }) + '\n',
-              ),
+                }),
             )
           } catch {
             /* ignore */
@@ -703,8 +682,7 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'application/x-ndjson',
-      'Cache-Control': 'no-cache',
+      ...SSE_HEADERS,
       'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
     },
   })

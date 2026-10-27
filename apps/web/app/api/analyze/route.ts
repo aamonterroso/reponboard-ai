@@ -1,7 +1,12 @@
 export const maxDuration = 300
 
-import { runDiscovery, runFullAnalysisStream } from '@reponboard/agent-core'
-import type { LLMModelIntent } from '@reponboard/agent-core'
+import {
+  GitHubClient,
+  parseGitHubUrl,
+  runDiscovery,
+  runFullAnalysisStream,
+} from '@reponboard/agent-core'
+import type { LLMMode, LLMModelIntent } from '@reponboard/agent-core'
 import { NextResponse } from 'next/server'
 import {
   checkRateLimit,
@@ -11,6 +16,14 @@ import {
   recordRequestStart,
 } from '@/lib/rate-limit'
 import type { RateLimitResult } from '@/lib/rate-limit'
+import {
+  analysisCacheKey,
+  readCachedAnalysis,
+  writeCachedAnalysis,
+} from '@/lib/analysis-cache'
+import type { CachedAnalysis, CachedTraceEvent } from '@/lib/analysis-cache'
+import { createSseWriter, SSE_HEADERS } from '@/lib/sse'
+import type { SseWriter } from '@/lib/sse'
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
 // Code-level cap on the analysis, well under the 300s maxDuration of
@@ -30,6 +43,68 @@ function sanitizeGitHubUrl(rawUrl: string): string {
   const parsed = new URL(rawUrl)
   const cleanPath = parsed.pathname.replace(/\/+$/, '')
   return `https://github.com${cleanPath}`
+}
+
+function resolveIntent(): {
+  intent: LLMModelIntent | undefined
+  llmMode: LLMMode
+  resolvedIntent: LLMModelIntent
+} {
+  const rawIntent = process.env.LLM_MODEL_INTENT
+  const rawMode = process.env.LLM_MODE
+  let intent: LLMModelIntent | undefined
+  let llmMode: LLMMode = 'production'
+
+  if (rawIntent === 'fast' || rawIntent === 'quality') {
+    intent = rawIntent
+  } else if (rawMode === 'development' || rawMode === 'production') {
+    console.warn(
+      '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
+        '"fast" | "quality" instead.',
+    )
+    llmMode = rawMode
+  }
+  // Mirrors the resolution inside agent-core so the cache key names the
+  // model tier that will actually run.
+  const resolvedIntent = intent ?? (llmMode === 'development' ? 'fast' : 'quality')
+  return { intent, llmMode, resolvedIntent }
+}
+
+// Null when the HEAD SHA can't be read (rate-limited GitHub, missing
+// repo): the request then runs uncached and the real error, if any,
+// surfaces from discovery.
+async function resolveCacheKey(
+  repoUrl: string,
+  githubToken: string | undefined,
+  intent: LLMModelIntent,
+): Promise<string | null> {
+  try {
+    const { owner, repo, branch } = parseGitHubUrl(repoUrl)
+    const sha = await new GitHubClient(githubToken).getHeadSha(
+      owner,
+      repo,
+      branch ?? undefined,
+    )
+    return analysisCacheKey({ owner, repo, sha, intent })
+  } catch (err) {
+    console.warn('[analysis-cache] could not resolve HEAD sha', err)
+    return null
+  }
+}
+
+function replayCachedAnalysis(cached: CachedAnalysis): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const sse = createSseWriter(controller)
+      sse.send({ phase: 'cache_hit', cachedAt: cached.cachedAt })
+      for (const event of cached.trace) sse.send(event)
+      sse.send({ phase: 'complete', result: cached.result })
+      sse.close()
+    },
+  })
+  return new Response(stream, {
+    headers: { ...SSE_HEADERS, 'X-Analysis-Cache': 'HIT' },
+  })
 }
 
 export async function POST(request: Request): Promise<NextResponse | Response> {
@@ -71,17 +146,31 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  // Rate limit: check up-front against the shared Redis state; increment
-  // the request counter before the analysis runs so the slot is reserved
-  // even if the stream is aborted. Cost is added to the budget key only
-  // after a successful 'complete' event.
+  let repoUrl: string
+  try {
+    repoUrl = sanitizeGitHubUrl(rawUrl)
+  } catch {
+    return NextResponse.json(
+      {
+        error:
+          'Please enter a valid GitHub repository URL — e.g. https://github.com/owner/repo',
+      },
+      { status: 400 },
+    )
+  }
+
+  const githubToken = process.env.GITHUB_TOKEN ?? undefined
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY
+  const hasLlm = anthropicApiKey !== undefined && anthropicApiKey !== ''
+  const { intent, llmMode, resolvedIntent } = resolveIntent()
+
+  // Rate limit: check up-front against the shared Redis state. Fail
+  // closed when Redis is unreachable: the daily budget cap lives there, so
+  // serving without it would leave LLM spend uncapped.
   const ip = getClientIp(request)
-  // Fail closed when Redis is unreachable: the daily budget cap lives
-  // there, so serving without it would leave LLM spend uncapped.
   let rateLimit: RateLimitResult
   try {
     rateLimit = await checkRateLimit(ip, 'analyze')
-    if (rateLimit.allowed) await recordRequestStart(ip, 'analyze')
   } catch (err) {
     if (!(err instanceof RateLimitUnavailableError)) throw err
     return NextResponse.json(
@@ -102,38 +191,33 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
     )
   }
 
-  let repoUrl: string
+  // Cache lookup sits behind the rate-limit check (the HEAD SHA lookup
+  // spends shared GitHub quota) but before the slot is recorded: a hit
+  // costs no LLM spend, so it doesn't consume the visitor's allowance.
+  let cacheKey: string | null = null
+  if (hasLlm) {
+    cacheKey = await resolveCacheKey(repoUrl, githubToken, resolvedIntent)
+    const cached = cacheKey !== null ? await readCachedAnalysis(cacheKey) : null
+    if (cached !== null) {
+      console.log(`[analysis-cache] HIT ${cacheKey}`)
+      return replayCachedAnalysis(cached)
+    }
+  }
+
+  // Reserve the slot before the analysis runs so it counts even if the
+  // stream is aborted. Cost is added to the budget key only after a
+  // successful 'complete' event.
   try {
-    repoUrl = sanitizeGitHubUrl(rawUrl)
-  } catch {
+    await recordRequestStart(ip, 'analyze')
+  } catch (err) {
+    if (!(err instanceof RateLimitUnavailableError)) throw err
     return NextResponse.json(
-      {
-        error:
-          'Please enter a valid GitHub repository URL — e.g. https://github.com/owner/repo',
-      },
-      { status: 400 },
+      { error: RATE_LIMITER_UNAVAILABLE_MESSAGE, reason: 'rate_limiter_unavailable' },
+      { status: 503 },
     )
   }
 
-  const githubToken = process.env.GITHUB_TOKEN ?? undefined
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY
-
-  if (anthropicApiKey !== undefined && anthropicApiKey !== '') {
-    const rawIntent = process.env.LLM_MODEL_INTENT
-    const rawMode = process.env.LLM_MODE
-    let intent: LLMModelIntent | undefined
-    let llmMode: 'development' | 'production' = 'production'
-
-    if (rawIntent === 'fast' || rawIntent === 'quality') {
-      intent = rawIntent
-    } else if (rawMode === 'development' || rawMode === 'production') {
-      console.warn(
-        '[env] LLM_MODE is deprecated. Set LLM_MODEL_INTENT to ' +
-          '"fast" | "quality" instead.',
-      )
-      llmMode = rawMode
-    }
-
+  if (hasLlm) {
     const generator = runFullAnalysisStream(
       repoUrl,
       githubToken,
@@ -141,42 +225,50 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
       llmMode,
       intent,
     )
-    const encoder = new TextEncoder()
 
-    const stream = new ReadableStream({
+    // Hoisted so cancel() can reach it: when the client disconnects, the
+    // writer closes and the loop below stops pulling from the agent after
+    // the in-flight step, instead of paying for the rest of the run.
+    let sse: SseWriter | null = null
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        console.log(`[timing] client disconnected at ${Date.now() - reqStart}ms`)
+        sse?.close()
+      },
       async start(controller) {
-        let closed = false
-
-        const closeStream = (errorMsg?: string): void => {
-          if (closed) return
-          closed = true
-          if (errorMsg !== undefined) {
-            try {
-              controller.enqueue(
-                encoder.encode(JSON.stringify({ phase: 'error', error: errorMsg }) + '\n'),
-              )
-            } catch { /* ignore */ }
-          }
-          try { controller.close() } catch { /* ignore */ }
-        }
+        const writer = createSseWriter(controller)
+        sse = writer
+        // Trace events are kept so a successful run can be cached and
+        // replayed into the AI Lab on a later hit.
+        const trace: CachedTraceEvent[] = []
 
         const timeout = setTimeout(
           () => {
             console.log(`[timing] timeout reached at ${Date.now() - reqStart}ms`)
-            closeStream(
-              'Analysis timed out. The repository may be too large — please try a smaller repo.',
-            )
+            writer.send({
+              phase: 'error',
+              error:
+                'Analysis timed out. The repository may be too large — please try a smaller repo.',
+            })
+            writer.close()
           },
           TIMEOUT_MS,
         )
 
         try {
           for await (const event of generator) {
-            if (closed) break
-            // Charge the shared budget cap only on successful completion.
-            // Errors and the timeout path skip this so they don't dilute
-            // the cost-per-success accounting on the budget key.
+            if (writer.closed) break
+            if (
+              event.phase === 'llm_call' ||
+              event.phase === 'tool_end' ||
+              event.phase === 'thinking'
+            ) {
+              trace.push(event)
+            }
             if (event.phase === 'complete') {
+              // Charge the shared budget cap only on successful completion.
+              // Errors and the timeout path skip this so they don't dilute
+              // the cost-per-success accounting on the budget key.
               const coreCost = event.result.meta?.core?.costUsd ?? 0
               const guideCost = event.result.meta?.guide?.costUsd ?? 0
               const costUsd = coreCost + guideCost
@@ -185,26 +277,36 @@ export async function POST(request: Request): Promise<NextResponse | Response> {
                   console.warn('[rate-limit] recordAnalysisCost failed', err)
                 })
               }
+              if (
+                cacheKey !== null &&
+                event.result.llmAnalysis !== null &&
+                event.result.error === null
+              ) {
+                void writeCachedAnalysis(cacheKey, event.result, trace)
+              }
             }
             if (event.phase === 'complete' || event.phase === 'error') {
               console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
             }
-            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+            writer.send(event)
           }
         } catch (err) {
           console.log(`[timing] route done at ${Date.now() - reqStart}ms`)
-          closeStream(err instanceof Error ? err.message : 'Stream error')
+          writer.send({
+            phase: 'error',
+            error: err instanceof Error ? err.message : 'Stream error',
+          })
         } finally {
           clearTimeout(timeout)
-          closeStream()
+          writer.close()
         }
       },
     })
 
     return new Response(stream, {
       headers: {
-        'Content-Type': 'application/x-ndjson',
-        'Cache-Control': 'no-cache',
+        ...SSE_HEADERS,
+        'X-Analysis-Cache': cacheKey !== null ? 'MISS' : 'BYPASS',
         'X-RateLimit-Remaining': String(rateLimit.remainingForIp),
       },
     })

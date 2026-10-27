@@ -13,7 +13,7 @@ function resolveKeyPrefix(): string {
 
 const KEY_PREFIX = resolveKeyPrefix()
 
-function prefixKey(key: string): string {
+export function prefixKey(key: string): string {
   return `${KEY_PREFIX}:${key}`
 }
 
@@ -41,7 +41,7 @@ if (UPSTASH_TOKEN === undefined || UPSTASH_TOKEN === '') {
   )
 }
 
-const redis = new Redis({ url: UPSTASH_URL, token: UPSTASH_TOKEN })
+export const redis = new Redis({ url: UPSTASH_URL, token: UPSTASH_TOKEN })
 
 // Thrown when Upstash cannot serve a command. An archived or throttled
 // database answers HTTP 200 with an `{error: ...}` body, which the SDK

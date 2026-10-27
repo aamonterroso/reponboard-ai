@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import type {
   AnalysisMetaByPhase,
   ArchitecturePattern,
@@ -14,7 +14,6 @@ import type {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Check, ChevronDown, ExternalLink } from 'lucide-react'
-import { QaChat } from './qa-chat'
 import { RepoHeaderSkeleton } from './skeletons/repo-header-skeleton'
 import { ExecutiveSummarySkeleton } from './skeletons/executive-summary-skeleton'
 import { StackSkeleton } from './skeletons/stack-skeleton'
@@ -31,6 +30,10 @@ interface AnalysisResultProps {
   complete: boolean
   onReset: () => void
 }
+
+// Q&A pulls in react-markdown and Prism; load it only once the analysis
+// completes and the chat can actually open.
+const QaChat = lazy(() => import('./qa-chat').then((m) => ({ default: m.QaChat })))
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -867,26 +870,28 @@ export function AnalysisResult({
         guide !== null &&
         discovery !== null &&
         analysisMeta !== null && (
-          <QaChat
-            result={{
-              id: analysisMeta.id,
-              repoUrl: analysisMeta.repoUrl,
-              status: 'complete',
-              discovery,
-              llmAnalysis: {
-                refinedStack: core.refinedStack,
-                executiveSummary: core.executiveSummary,
-                architectureInsights: core.architectureInsights,
-                keyFiles: guide.keyFiles,
-                explorationPath: guide.explorationPath,
-                codebaseContext: guide.codebaseContext,
-              },
-              meta: analysisMeta.meta,
-              error: null,
-              createdAt: '',
-              completedAt: '',
-            }}
-          />
+          <Suspense fallback={null}>
+            <QaChat
+              result={{
+                id: analysisMeta.id,
+                repoUrl: analysisMeta.repoUrl,
+                status: 'complete',
+                discovery,
+                llmAnalysis: {
+                  refinedStack: core.refinedStack,
+                  executiveSummary: core.executiveSummary,
+                  architectureInsights: core.architectureInsights,
+                  keyFiles: guide.keyFiles,
+                  explorationPath: guide.explorationPath,
+                  codebaseContext: guide.codebaseContext,
+                },
+                meta: analysisMeta.meta,
+                error: null,
+                createdAt: '',
+                completedAt: '',
+              }}
+            />
+          </Suspense>
         )}
     </div>
   )

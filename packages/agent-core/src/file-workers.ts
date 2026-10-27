@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { withAnthropicRetry } from './anthropic-retry'
 import { addUsage, calculateCost, createUsageTotals } from './pricing'
+import { buildTraceLlmCall } from './trace'
+import type { TraceLlmCall } from './types'
 
 // Orchestrator–worker fan-out. Before the main ReAct loop starts, cheap
 // Haiku 5.5 workers each read one secondary key file and return a short
@@ -19,6 +21,8 @@ export interface FileSummary {
 
 export interface WorkerRunResult {
   summaries: FileSummary[]
+  // One trace entry per successful worker call, for the AI Lab.
+  traces: TraceLlmCall[]
   calls: number
   latencyMs: number
   costUsd: number
@@ -32,7 +36,8 @@ async function summarizeFile(
   client: Anthropic,
   path: string,
   content: string,
-): Promise<{ summary: string; usage: Anthropic.Usage }> {
+): Promise<{ summary: string; trace: TraceLlmCall; usage: Anthropic.Usage }> {
+  const start = Date.now()
   const response = await withAnthropicRetry(
     () =>
       client.messages.create({
@@ -54,7 +59,14 @@ async function summarizeFile(
     .map((b) => b.text)
     .join('')
     .trim()
-  return { summary, usage: response.usage }
+  const trace = buildTraceLlmCall({
+    step: 0,
+    stage: 'workers',
+    model: WORKER_MODEL,
+    latencyMs: Date.now() - start,
+    response,
+  })
+  return { summary, trace, usage: response.usage }
 }
 
 // Runs one worker per file, all concurrently. A failed worker drops its
@@ -72,6 +84,7 @@ export async function summarizeFilesWithWorkers(
 
   const usage = createUsageTotals()
   const summaries: FileSummary[] = []
+  const traces: TraceLlmCall[] = []
   settled.forEach((outcome, i) => {
     const path = entries[i]?.[0]
     if (path === undefined) return
@@ -80,6 +93,7 @@ export async function summarizeFilesWithWorkers(
       return
     }
     addUsage(usage, outcome.value.usage)
+    traces.push(outcome.value.trace)
     if (outcome.value.summary !== '') {
       summaries.push({ path, summary: outcome.value.summary })
     }
@@ -87,6 +101,7 @@ export async function summarizeFilesWithWorkers(
 
   return {
     summaries,
+    traces,
     calls: entries.length,
     latencyMs: Date.now() - start,
     costUsd: calculateCost(WORKER_MODEL, usage),

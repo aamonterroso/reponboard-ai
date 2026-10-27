@@ -1,211 +1,98 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import type {
-  AnalysisMetaByPhase,
-  AnalysisPhase,
-  DiscoveryResult,
-  FullAnalysisResult,
-  LLMCorePartial,
-  LLMGuidePartial,
-} from '@reponboard/agent-core'
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { extractErrorMessage } from '@/lib/error-message'
-import { AnalysisResult } from './analysis-result'
+import { useAnalysisStream } from '@/hooks/use-analysis-stream'
 import { AnalysisProgress } from './analysis-progress'
+import { AiLabPanelSkeleton } from './ai-lab/ai-lab-panel'
+import { ResultsSkeleton } from './skeletons/results-skeleton'
+
+// Code-split: the results view (and the Q&A stack under it) and the AI
+// Lab only load once an analysis starts, so first paint ships just the
+// input form. Suspense shows the existing skeletons while chunks load.
+const loadAnalysisResult = () => import('./analysis-result')
+const AnalysisResult = lazy(() =>
+  loadAnalysisResult().then((m) => ({ default: m.AnalysisResult })),
+)
+const loadAiLab = () => import('./ai-lab/ai-lab-panel')
+const AiLabPanel = lazy(() => loadAiLab().then((m) => ({ default: m.AiLabPanel })))
 
 const GITHUB_URL_REGEX = /^https?:\/\/github\.com\/[\w][\w.-]*\/[\w][\w.-]*\/?$/i
+const LAB_OPEN_STORAGE_KEY = 'reponboard:ai-lab-open'
 
 function isValidGitHubUrl(url: string): boolean {
   return GITHUB_URL_REGEX.test(url.trim())
 }
 
+function readLabOpen(): boolean {
+  try {
+    return window.localStorage.getItem(LAB_OPEN_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function fetchRemaining(onValue: (remaining: number | null) => void): void {
+  void fetch('/api/remaining')
+    .then((r) => r.json())
+    .then((data: { remaining: number | null }) => onValue(data.remaining))
+    .catch(() => undefined)
+}
+
 export function UrlInput(): React.JSX.Element {
   const [url, setUrl] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [core, setCore] = useState<LLMCorePartial | null>(null)
-  const [guide, setGuide] = useState<LLMGuidePartial | null>(null)
-  const [discovery, setDiscovery] = useState<DiscoveryResult | null>(null)
-  const [analysisMeta, setAnalysisMeta] = useState<{
-    id: string
-    repoUrl: string
-    meta: AnalysisMetaByPhase | null
-  } | null>(null)
-  const [complete, setComplete] = useState(false)
-  const [seenPhases, setSeenPhases] = useState<Set<AnalysisPhase>>(new Set())
-  const [currentPhase, setCurrentPhase] = useState<AnalysisPhase | null>(null)
-  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
-  const [streamMessage, setStreamMessage] = useState('')
+  const [inputError, setInputError] = useState<string | null>(null)
   const [remaining, setRemaining] = useState<number | null>(null)
+  const [labOpen, setLabOpen] = useState(true)
+  const { state, analyze, reset } = useAnalysisStream()
 
   useEffect(() => {
-    void fetch('/api/remaining')
-      .then((r) => r.json())
-      .then((data: { remaining: number | null }) => {
-        setRemaining(data.remaining)
-      })
-      .catch(() => undefined)
+    fetchRemaining(setRemaining)
+    setLabOpen(readLabOpen())
   }, [])
+
+  function toggleLab(): void {
+    setLabOpen((prev) => {
+      const next = !prev
+      try {
+        window.localStorage.setItem(LAB_OPEN_STORAGE_KEY, String(next))
+      } catch {
+        /* storage unavailable */
+      }
+      return next
+    })
+  }
+
+  // Warm the results chunks while the user is still typing.
+  function prefetchResults(): void {
+    void loadAnalysisResult()
+    void loadAiLab()
+  }
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>): void {
     setUrl(e.target.value)
-    if (error !== null) setError(null)
+    if (inputError !== null) setInputError(null)
   }
 
   async function handleAnalyze(): Promise<void> {
     const trimmed = url.trim()
 
     if (trimmed === '') {
-      setError('Please enter a GitHub repository URL.')
+      setInputError('Please enter a GitHub repository URL.')
       return
     }
 
     if (!isValidGitHubUrl(trimmed)) {
-      setError('Must be a valid GitHub repository URL — e.g. https://github.com/owner/repo')
+      setInputError('Must be a valid GitHub repository URL — e.g. https://github.com/owner/repo')
       return
     }
 
-    setError(null)
-    setLoading(true)
-
-    try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoUrl: trimmed }),
-      })
-
-      if (!response.ok) {
-        const data: unknown = await response.json().catch(() => ({}))
-        setError(extractErrorMessage(data, 'An unexpected error occurred.'))
-        if (response.status === 429) {
-          setRemaining(0)
-        }
-        return
-      }
-
-      const remainingHeader = response.headers.get('X-RateLimit-Remaining')
-      if (remainingHeader !== null) {
-        setRemaining(parseInt(remainingHeader, 10))
-      }
-
-      const contentType = response.headers.get('Content-Type') ?? ''
-
-      if (contentType.includes('application/x-ndjson') && response.body !== null) {
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() ?? ''
-
-          for (const line of lines) {
-            if (line.trim() === '') continue
-            try {
-              const event = JSON.parse(line) as {
-                phase: AnalysisPhase
-                result?: FullAnalysisResult
-                error?: string
-                message?: string
-                core?: LLMCorePartial
-                guide?: LLMGuidePartial
-                progress?: unknown
-              }
-
-              setSeenPhases((prev) => {
-                const next = new Set(prev)
-                next.add(event.phase)
-                return next
-              })
-
-              if (event.phase === 'discovery') {
-                setCurrentPhase('discovery')
-                setStreamMessage(event.message ?? '')
-              } else if (event.phase === 'analyzing') {
-                setCurrentPhase('analyzing')
-                setStreamMessage(event.message ?? '')
-              } else if (event.phase === 'thinking') {
-                setCurrentPhase('analyzing')
-                setStreamMessage(event.message ?? 'Agent is thinking...')
-              } else if (event.phase === 'partial_core' && event.core !== undefined) {
-                setCore(event.core)
-              } else if (event.phase === 'partial_guide' && event.guide !== undefined) {
-                setGuide(event.guide)
-              } else if (event.phase === 'complete' && event.result !== undefined) {
-                setDiscovery(event.result.discovery)
-                setAnalysisMeta({
-                  id: event.result.id,
-                  repoUrl: event.result.repoUrl,
-                  meta: event.result.meta ?? null,
-                })
-                setComplete(true)
-                window.dispatchEvent(
-                  new CustomEvent('reponboard:remaining-changed'),
-                )
-                if (event.result.llmAnalysis !== null) {
-                  setCore({
-                    refinedStack: event.result.llmAnalysis.refinedStack,
-                    executiveSummary: event.result.llmAnalysis.executiveSummary,
-                    architectureInsights: event.result.llmAnalysis.architectureInsights,
-                  })
-                  setGuide({
-                    keyFiles: event.result.llmAnalysis.keyFiles,
-                    explorationPath: event.result.llmAnalysis.explorationPath,
-                    codebaseContext: event.result.llmAnalysis.codebaseContext,
-                  })
-                }
-                setCurrentPhase('complete')
-                setStreamMessage('')
-                return
-              } else if (event.phase === 'error' && event.error !== undefined) {
-                setError(event.error)
-                return
-              }
-            } catch {
-              // skip malformed lines
-            }
-          }
-        }
-      } else {
-        // Fallback: non-streaming JSON response (e.g. heuristic-only path)
-        const data: unknown = await response.json()
-        const fallback = data as FullAnalysisResult
-        setDiscovery(fallback.discovery)
-        setAnalysisMeta({
-          id: fallback.id,
-          repoUrl: fallback.repoUrl,
-          meta: fallback.meta ?? null,
-        })
-        setComplete(true)
-        window.dispatchEvent(
-          new CustomEvent('reponboard:remaining-changed'),
-        )
-        if (fallback.llmAnalysis !== null) {
-          setCore({
-            refinedStack: fallback.llmAnalysis.refinedStack,
-            executiveSummary: fallback.llmAnalysis.executiveSummary,
-            architectureInsights: fallback.llmAnalysis.architectureInsights,
-          })
-          setGuide({
-            keyFiles: fallback.llmAnalysis.keyFiles,
-            explorationPath: fallback.llmAnalysis.explorationPath,
-            codebaseContext: fallback.llmAnalysis.codebaseContext,
-          })
-        }
-        setCurrentPhase('complete')
-        setStreamMessage('')
-      }
-    } catch {
-      setError('Failed to reach the server. Please try again.')
-    } finally {
-      setLoading(false)
+    setInputError(null)
+    const info = await analyze(trimmed)
+    if (info?.remaining !== null && info?.remaining !== undefined) {
+      setRemaining(info.remaining)
     }
   }
 
@@ -217,50 +104,84 @@ export function UrlInput(): React.JSX.Element {
 
   function handleReset(): void {
     setUrl('')
-    setError(null)
-    setCore(null)
-    setGuide(null)
-    setDiscovery(null)
-    setAnalysisMeta(null)
-    setComplete(false)
-    setSeenPhases(new Set())
-    setCurrentPhase(null)
-    setProgress(null)
-    setStreamMessage('')
-    void fetch('/api/remaining')
-      .then((r) => r.json())
-      .then((data: { remaining: number | null }) => {
-        setRemaining(data.remaining)
-      })
-      .catch(() => undefined)
+    setInputError(null)
+    reset()
+    fetchRemaining(setRemaining)
   }
 
-  const showInput = !loading && !complete && core === null
+  const loading = state.status === 'streaming'
+  const error = inputError ?? state.error
+  // A request that fails before anything streams (429, bad repo) keeps the
+  // form on screen with the error under it.
+  const failedBeforeStream =
+    state.status === 'error' && state.core === null && state.trace.length === 0
+  const showInput = state.status === 'idle' || failedBeforeStream
 
   if (!showInput) {
     return (
-      <div className="w-full flex flex-col gap-4">
-        {currentPhase !== null && (
-          <AnalysisProgress
-            seenPhases={seenPhases}
-            currentPhase={currentPhase}
-            progress={progress ?? undefined}
-            message={streamMessage}
-          />
+      <div
+        className={
+          labOpen
+            ? 'w-[min(1200px,calc(100vw-2rem))] grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px] items-start'
+            : 'w-full'
+        }
+      >
+        <div className="flex flex-col gap-4 min-w-0">
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              {state.currentPhase !== null && (
+                <AnalysisProgress
+                  seenPhases={state.seenPhases}
+                  currentPhase={state.currentPhase}
+                  message={state.message}
+                />
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={toggleLab}
+              aria-pressed={labOpen}
+              className="shrink-0"
+            >
+              {labOpen ? (
+                <PanelRightClose className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <PanelRightOpen className="h-4 w-4" aria-hidden="true" />
+              )}
+              <span className="text-xs">AI Lab</span>
+            </Button>
+          </div>
+          {error !== null && (
+            <p role="alert" className="text-sm text-red-400 text-left">
+              {error}
+            </p>
+          )}
+          {labOpen && (
+            <Suspense fallback={<AiLabPanelSkeleton className="lg:hidden" />}>
+              <AiLabPanel state={state} className="lg:hidden max-h-[60vh]" />
+            </Suspense>
+          )}
+          <Suspense fallback={<ResultsSkeleton />}>
+            <AnalysisResult
+              core={state.core}
+              guide={state.guide}
+              discovery={state.discovery}
+              analysisMeta={state.analysisMeta}
+              complete={state.status === 'complete'}
+              onReset={handleReset}
+            />
+          </Suspense>
+        </div>
+        {labOpen && (
+          <Suspense fallback={<AiLabPanelSkeleton className="hidden lg:flex lg:sticky lg:top-4" />}>
+            <AiLabPanel
+              state={state}
+              className="hidden lg:flex lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)]"
+            />
+          </Suspense>
         )}
-        {error !== null && (
-          <p role="alert" className="text-sm text-red-400 text-left">
-            {typeof error === 'string' ? error : 'Something went wrong.'}
-          </p>
-        )}
-        <AnalysisResult
-          core={core}
-          guide={guide}
-          discovery={discovery}
-          analysisMeta={analysisMeta}
-          complete={complete}
-          onReset={handleReset}
-        />
       </div>
     )
   }
@@ -273,6 +194,7 @@ export function UrlInput(): React.JSX.Element {
           value={url}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onFocus={prefetchResults}
           placeholder="https://github.com/owner/repo"
           disabled={loading}
           aria-label="GitHub repository URL"
@@ -310,7 +232,7 @@ export function UrlInput(): React.JSX.Element {
 
       {error !== null && (
         <p role="alert" className="text-sm text-red-400 text-left">
-          {typeof error === 'string' ? error : 'Something went wrong.'}
+          {error}
         </p>
       )}
     </div>

@@ -8,6 +8,7 @@ import type {
 } from '@reponboard/agent-core'
 import { Button } from '@/components/ui/button'
 import { extractErrorMessage } from '@/lib/error-message'
+import { readSseEvents } from '@/lib/sse-client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -166,9 +167,6 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
           return
         }
 
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
         let finalResult: {
           answer: string
           filesReferenced: string[]
@@ -178,83 +176,68 @@ export function QaChat({ result }: QaChatProps): React.JSX.Element | null {
           meta?: { classifierConfidence?: number; classifierDegradedMode?: boolean }
         } | null = null
 
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() ?? ''
-
-          for (const line of lines) {
-            if (line.trim() === '') continue
-            try {
-              const event = JSON.parse(line) as {
-                phase: string
-                message?: string
-                toolCall?: string
-                toolInput?: Record<string, unknown>
-                tool?: string
-                summary?: string
-                result?: QAResult
-                error?: string
-                errorCode?: string
-                requestId?: string
+        for await (const event of readSseEvents<{
+          phase: string
+          message?: string
+          toolCall?: string
+          toolInput?: Record<string, unknown>
+          tool?: string
+          summary?: string
+          result?: QAResult
+          error?: string
+          errorCode?: string
+          requestId?: string
+        }>(response.body)) {
+          if (event.phase === 'thinking') {
+            const inp = event.toolInput ?? {}
+            const label =
+              typeof inp.path === 'string'
+                ? inp.path
+                : typeof inp.query === 'string'
+                  ? inp.query
+                  : (event.message ?? '')
+            const nextActivity: ToolActivity = {}
+            if (event.toolCall !== undefined)
+              nextActivity.toolCall = event.toolCall
+            if (label !== '') nextActivity.label = label
+            setActivity(nextActivity)
+          } else if (
+            event.phase === 'complete' &&
+            event.result !== undefined
+          ) {
+            const evt = event as {
+              phase: string
+              result?: {
+                answer: string
+                filesReferenced: string[]
+                costUsd?: number
+                classification?: 'on_topic' | 'off_topic' | 'needs_clarification'
+                suggestions?: string[]
+                meta?: { classifierConfidence?: number; classifierDegradedMode?: boolean }
               }
-              if (event.phase === 'thinking') {
-                const inp = event.toolInput ?? {}
-                const label =
-                  typeof inp.path === 'string'
-                    ? inp.path
-                    : typeof inp.query === 'string'
-                      ? inp.query
-                      : (event.message ?? '')
-                const nextActivity: ToolActivity = {}
-                if (event.toolCall !== undefined)
-                  nextActivity.toolCall = event.toolCall
-                if (label !== '') nextActivity.label = label
-                setActivity(nextActivity)
-              } else if (
-                event.phase === 'complete' &&
-                event.result !== undefined
-              ) {
-                const evt = event as {
-                  phase: string
-                  result?: {
-                    answer: string
-                    filesReferenced: string[]
-                    costUsd?: number
-                    classification?: 'on_topic' | 'off_topic' | 'needs_clarification'
-                    suggestions?: string[]
-                    meta?: { classifierConfidence?: number; classifierDegradedMode?: boolean }
-                  }
-                }
-                finalResult = evt.result ?? null
-              } else if (
-                event.phase === 'error' &&
-                event.error !== undefined
-              ) {
-                const errorMessage: LocalQaMessage = {
-                  role: 'assistant',
-                  content: '',
-                  filesReferenced: [],
-                  timestamp: nowIso(),
-                  isError: true,
-                  ...(event.errorCode !== undefined && {
-                    errorCode: event.errorCode as NonNullable<LocalQaMessage['errorCode']>,
-                  }),
-                  ...(event.requestId !== undefined && {
-                    requestId: event.requestId,
-                  }),
-                }
-                setMessages((prev) => [...prev, errorMessage])
-                setLoading(false)
-                setActivity(null)
-                return
-              }
-            } catch {
-              // skip malformed lines
             }
+            finalResult = evt.result ?? null
+          } else if (
+            event.phase === 'error' &&
+            event.error !== undefined
+          ) {
+            const errorMessage: LocalQaMessage = {
+              role: 'assistant',
+              content: '',
+              filesReferenced: [],
+              timestamp: nowIso(),
+              isError: true,
+              ...(event.errorCode !== undefined && {
+                errorCode: event.errorCode as NonNullable<LocalQaMessage['errorCode']>,
+              }),
+              ...(event.requestId !== undefined && {
+                requestId: event.requestId,
+              }),
+            }
+            setMessages((prev) => [...prev, errorMessage])
+            setLoading(false)
+            setActivity(null)
+            return
           }
         }
 
